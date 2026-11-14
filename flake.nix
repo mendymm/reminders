@@ -108,6 +108,13 @@
           # crates inherit that through their dependencies, so the same source gets
           # different symbol hashes on different build hosts (rust-lang/cargo#8140).
           # Replace the value with a hash of inputs that do not depend on the host.
+          #
+          # The wrapper also makes the paths that rustc embeds host independent, since
+          # the linker's string merging order depends on them. Vendored crate paths and
+          # their working directories contain store hashes that differ per build host,
+          # so they are remapped to the placeholder hash crane substitutes afterwards.
+          # `-Zremap-cwd-prefix` (the only way to remap DW_AT_comp_dir) needs
+          # RUSTC_BOOTSTRAP, which is set for the compiler process only.
           rustcWrapper = pkgs.writeShellScript "rustc-stable-metadata" ''
             set -eu
             rustc=$1
@@ -115,6 +122,7 @@
             args=("$@")
             key=""
             meta=""
+            vendor=""
             i=0
             while [ "$i" -lt "''${#args[@]}" ]; do
               arg=''${args[$i]}
@@ -132,6 +140,7 @@
                 *.rs)
                   case "$arg" in
                     *-vendor-cargo-deps/*)
+                      vendor=''${arg%%-vendor-cargo-deps/*}-vendor-cargo-deps
                       arg=''${arg#*-vendor-cargo-deps/}
                       arg=''${arg#*/}
                       ;;
@@ -141,11 +150,26 @@
               esac
               i=$((i + 1))
             done
-            if [ -n "$meta" ]; then
-              hash=$(printf '%s' "$key" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
-              args[$meta]="metadata=$hash"
+            if [ -z "$meta" ]; then
+              exec "$rustc" "''${args[@]}"
             fi
-            exec "$rustc" "''${args[@]}"
+            hash=$(printf '%s' "$key" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+            args[$meta]="metadata=$hash"
+            placeholder=/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+            if [ -n "$vendor" ]; then
+              args+=("--remap-path-prefix=$vendor=$placeholder-vendor-cargo-deps")
+            fi
+            cwd=$(pwd -P)
+            case "$cwd" in
+              /nix/store/*-cargo-package-*)
+                package=''${cwd##*/}
+                args+=("-Zremap-cwd-prefix=$placeholder-''${package#*-}")
+                ;;
+              *)
+                args+=("-Zremap-cwd-prefix=/build/source")
+                ;;
+            esac
+            RUSTC_BOOTSTRAP=1 exec "$rustc" "''${args[@]}"
           '';
 
           mkReminderCore =
@@ -168,8 +192,6 @@
                 ANDROID_NDK_HOME = rustNdkHome;
                 buildPhaseCargoCommand = buildCommand;
                 RUSTC_WRAPPER = rustcWrapper;
-                # Remap the build directory in debug info to the source store path.
-                doRemapPathPrefix = true;
               };
               cargoArtifacts = craneLib.buildDepsOnly commonArgs;
             in
