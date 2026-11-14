@@ -213,11 +213,61 @@
                 '';
               }
             );
+
+          reminderCore = lib.mapAttrs (_: mkReminderCore) androidAbis;
+
+          # crane vendors crates as symlinks into the store. askama (used by
+          # uniffi_bindgen) builds include paths relative to the symlink but
+          # canonicalizes the target, which breaks. Vendor with real copies instead.
+          vendorDir = craneLib.vendorCargoDeps { src = rustSrc; };
+          vendorCopy = pkgs.runCommand "vendor-cargo-deps-copy" { } ''
+            cp -rL ${vendorDir} "$out"
+            chmod -R u+w "$out"
+            substituteInPlace "$out/config.toml" --replace-fail "${vendorDir}" "$out"
+          '';
+
+          # Host build of the bindgen crate, which only depends on `uniffi` with `cli`.
+          uniffiBindgen = craneLib.buildPackage {
+            src = rustSrc;
+            pname = "uniffi-bindgen";
+            version = "0.1.0";
+            strictDeps = true;
+            doCheck = false;
+            cargoVendorDir = vendorCopy;
+            cargoExtraArgs = "--locked --package uniffi-bindgen";
+          };
+
+          # Kotlin bindings, generated from the arm64 library the same way the Gradle
+          # GenerateUniFfiBindings task does. Library mode reads the crate's
+          # uniffi.toml through `cargo metadata`, so it needs cargo, the workspace
+          # sources, and the vendored dependencies.
+          uniffiKotlin =
+            pkgs.runCommand "reminder-core-uniffi-kotlin"
+              {
+                nativeBuildInputs = [
+                  buildToolchain
+                  uniffiBindgen
+                ];
+              }
+              ''
+                export CARGO_HOME="$TMPDIR/cargo-home"
+                mkdir -p "$CARGO_HOME" work
+                cp ${vendorCopy}/config.toml "$CARGO_HOME/config.toml"
+                cp -r ${rustSrc}/. work
+                chmod -R u+w work
+                cd work
+                CARGO_NET_OFFLINE=true uniffi-bindgen generate \
+                  ${reminderCore.arm64}/arm64-v8a/libreminder_core.so \
+                  --language kotlin \
+                  --out-dir "$out"
+              '';
         in
         {
-          packages = lib.mapAttrs' (
-            name: entry: lib.nameValuePair "reminder-core-${name}" (mkReminderCore entry)
-          ) androidAbis;
+          packages =
+            lib.mapAttrs' (name: drv: lib.nameValuePair "reminder-core-${name}" drv) reminderCore
+            // {
+              uniffi-kotlin = uniffiKotlin;
+            };
 
           devShells.default = pkgs.mkShell {
             packages = [
