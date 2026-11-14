@@ -36,7 +36,7 @@ The initial `ping()` milestone has passed end to end. `./gradlew :app:assembleDe
 - Gradle 9.9.1
 - Kotlin and Compose compiler plugin 2.4.10
 - Android SDK 37.1
-- Android NDK 28.2.13676358
+- Android NDK 30.0.16248370
 - UniFFI 0.32.2
 - rusqlite 0.42.0 with bundled SQLite
 

@@ -56,7 +56,7 @@ abstract class CargoNdkBuild @Inject constructor(
         if (!ndk.isDirectory) {
             throw GradleException(
                 "Pinned Android NDK is missing: ${ndk.absolutePath}. " +
-                    "Install ndk;28.2.13676358 with sdkmanager.",
+                    "Install the NDK version pinned by this project with sdkmanager.",
             )
         }
 
@@ -151,7 +151,7 @@ abstract class GenerateUniFfiBindings @Inject constructor(
     }
 }
 
-val pinnedNdkVersion = "28.2.13676358"
+val pinnedNdkVersion = "30.0.16248370"
 val rustWorkspace = rootProject.layout.projectDirectory.dir("../rust")
 val cargoExecutableProvider = providers.gradleProperty("rustCargo").orElse("cargo")
 val rustAbis = providers.gradleProperty("rustAbis")
@@ -187,7 +187,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.mendy.reminders"
-        minSdk = 26
+        minSdk = 37
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
@@ -248,7 +248,7 @@ androidComponents.onVariants { variant ->
         ndkDirectory.set(pinnedNdkDirectoryProvider)
         cargoExecutable.set(cargoExecutableProvider)
         abis.set(rustAbis)
-        platform.set(26)
+        platform.set(37)
         release.set(isRelease)
         outputDirectory.set(layout.buildDirectory.dir("rustJniLibs/$variantName"))
     }
