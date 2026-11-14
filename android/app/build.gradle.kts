@@ -256,17 +256,31 @@ val rustAbis = providers.gradleProperty("rustAbis")
     }
     .orElse(listOf("arm64-v8a", "x86_64"))
 
-val rustInputFiles = files(
-    fileTree(rustWorkspace) {
-        include("**/*.rs")
-        include("**/Cargo.toml")
-        include("**/uniffi.toml")
-        exclude("target/**")
-    },
-)
-val cargoLock = rustWorkspace.file("Cargo.lock").asFile
-if (cargoLock.exists()) {
-    rustInputFiles.from(cargoLock)
+// The Nix build passes the compiled library and the generated Kotlin bindings as
+// prebuilt inputs instead of running cargo and uniffi-bindgen from Gradle.
+// -PprebuiltJniLibs is a directory laid out as <abi>/libreminder_core.so and
+// -PprebuiltUniffiKotlin is the directory of generated Kotlin sources.
+val prebuiltJniLibs = providers.gradleProperty("prebuiltJniLibs")
+val prebuiltUniffiKotlin = providers.gradleProperty("prebuiltUniffiKotlin")
+require(prebuiltJniLibs.isPresent == prebuiltUniffiKotlin.isPresent) {
+    "prebuiltJniLibs and prebuiltUniffiKotlin must be set together"
+}
+val usePrebuiltRust = prebuiltJniLibs.isPresent
+
+val rustInputFiles = files()
+if (!usePrebuiltRust) {
+    rustInputFiles.from(
+        fileTree(rustWorkspace) {
+            include("**/*.rs")
+            include("**/Cargo.toml")
+            include("**/uniffi.toml")
+            exclude("target/**")
+        },
+    )
+    val cargoLock = rustWorkspace.file("Cargo.lock").asFile
+    if (cargoLock.exists()) {
+        rustInputFiles.from(cargoLock)
+    }
 }
 
 android {
@@ -358,6 +372,27 @@ androidComponents.onVariants { variant ->
     val isRelease = variant.buildType == "release"
     val pinnedNdkDirectoryProvider = androidComponents.sdkComponents.sdkDirectory.map { sdk ->
         sdk.dir("ndk/$pinnedNdkVersion")
+    }
+
+    if (usePrebuiltRust) {
+        val jniLibsDirectory = file(prebuiltJniLibs.get())
+        val bindingsDirectory = file(prebuiltUniffiKotlin.get())
+        require(bindingsDirectory.isDirectory) {
+            "prebuiltUniffiKotlin is not a directory: ${bindingsDirectory.absolutePath}"
+        }
+        rustAbis.get().forEach { abi ->
+            val library = File(jniLibsDirectory, "$abi/libreminder_core.so")
+            require(library.isFile) {
+                "prebuiltJniLibs has no library for ABI $abi: ${library.absolutePath}"
+            }
+        }
+        if (isRelease) {
+            tasks.matching { task -> task.name == "pre${capitalizedVariant}Build" }
+                .configureEach { dependsOn(validateReleaseSigning) }
+        }
+        variant.sources.jniLibs?.addStaticSourceDirectory(jniLibsDirectory.absolutePath)
+        variant.sources.kotlin?.addStaticSourceDirectory(bindingsDirectory.absolutePath)
+        return@onVariants
     }
 
     val buildRust = tasks.register<CargoNdkBuild>("buildRust$capitalizedVariant") {

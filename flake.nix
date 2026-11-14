@@ -87,9 +87,14 @@
           buildToolchain = pkgs.rust-bin.stable.latest.minimal.override {
             targets = rustTargets;
           };
-          devToolchain = pkgs.rust-bin.stable.latest.default.override {
+          # The default profile also ships rust-docs, which is slow to unpack and unused.
+          devToolchain = pkgs.rust-bin.stable.latest.minimal.override {
             targets = rustTargets;
-            extensions = [ "rust-src" ];
+            extensions = [
+              "clippy"
+              "rust-src"
+              "rustfmt"
+            ];
           };
 
           craneLib = (crane.mkLib pkgs).overrideToolchain buildToolchain;
@@ -282,6 +287,7 @@
               pkgs.deadnix
               pkgs.statix
               pkgs.nix-output-monitor
+              pkgs.ktlint
             ];
 
             ANDROID_HOME = androidSdkRoot;
