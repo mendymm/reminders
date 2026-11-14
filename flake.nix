@@ -247,9 +247,11 @@
                 nativeBuildInputs = [
                   buildToolchain
                   uniffiBindgen
+                  pkgs.ktlint
                 ];
               }
               ''
+                export HOME="$TMPDIR"
                 export CARGO_HOME="$TMPDIR/cargo-home"
                 mkdir -p "$CARGO_HOME" work
                 cp ${vendorCopy}/config.toml "$CARGO_HOME/config.toml"
