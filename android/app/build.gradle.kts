@@ -305,6 +305,16 @@ android {
     }
 
     signingConfigs {
+        // Fixed, committed debug key (the standard Android debug credentials). AGP
+        // would otherwise generate a random keystore per machine, which makes APKs
+        // unreproducible and blocks in-place updates between builds.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+            storeType = "PKCS12"
+        }
         create("release") {
             storeType = "PKCS12"
             releaseKeystorePath.orNull?.let { path ->
