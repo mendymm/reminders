@@ -247,6 +247,11 @@ val releaseKeyAlias = providers.environmentVariable("REMINDERS_RELEASE_KEY_ALIAS
 val releaseKeystorePassword = providers.environmentVariable(
     "REMINDERS_RELEASE_KEYSTORE_PASSWORD",
 )
+
+// -PunsignedRelease builds the release variant without a signing config, which
+// produces an unsigned APK. The Nix build uses it so the real release keys never
+// enter the sandbox; the APK is signed afterwards with apksigner.
+val unsignedRelease = providers.gradleProperty("unsignedRelease").isPresent
 val rustAbis = providers.gradleProperty("rustAbis")
     .map { value ->
         value.split(',')
@@ -336,7 +341,9 @@ android {
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (!unsignedRelease) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -396,7 +403,7 @@ androidComponents.onVariants { variant ->
                 "prebuiltJniLibs has no library for ABI $abi: ${library.absolutePath}"
             }
         }
-        if (isRelease) {
+        if (isRelease && !unsignedRelease) {
             tasks.matching { task -> task.name == "pre${capitalizedVariant}Build" }
                 .configureEach { dependsOn(validateReleaseSigning) }
         }
@@ -416,7 +423,7 @@ androidComponents.onVariants { variant ->
         platform.set(37)
         release.set(isRelease)
         outputDirectory.set(layout.buildDirectory.dir("rustJniLibs/$variantName"))
-        if (isRelease) {
+        if (isRelease && !unsignedRelease) {
             dependsOn(validateReleaseSigning)
         }
     }

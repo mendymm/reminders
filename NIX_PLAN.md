@@ -9,8 +9,8 @@ Goal: build the debug APK with Nix so that `aarch64-darwin` and `x86_64-linux` m
 - Gradle: `pkgs.gradle_9` from nixpkgs. The default `pkgs.gradle` is Gradle 8 and must not be used. At the locked nixpkgs revision `gradle_9` is 9.8.2 with `jdk25` as its default JDK. AGP 9.5 requires Gradle 9.6.0 or later, so 9.8.2 is compatible. The wrapper's 9.9.1 is not used in the Nix build.
 - SDK and NDK from `androidenv.composeAndroidPackages`: platform `37.1`, NDK `30.0.16248370`, and build-tools `36.0.0`. AGP 9.5 defaults to and requires at least build-tools 36.0.0, so installing exactly that avoids AGP trying to download its own. The Rust derivations use a separate NDK-only SDK composition, so changing the Gradle-side SDK does not rebuild the Rust crates.
 - ABIs are one shared variable. The Nix build defaults to `arm64-v8a`. The Gradle-driven flow keeps `arm64-v8a,x86_64` through `gradle.properties`.
-- Planned outputs: `apk-arm64` (default), `apk-x86_64`, `apk-universal`. Rust is built once per ABI so the variants share cache.
-- Release signing stays outside the sandbox and is a later plan.
+- Outputs: `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`, plus `reminder-core-<abi>` and `uniffi-kotlin`. Rust is built once per ABI so the variants share cache.
+- Release signing stays outside the sandbox: the Nix build produces an unsigned APK named `reminders-release-UNSIGNED.zip` (not `.apk`, so it can't be installed by mistake), and `scripts/sign-release.py` signs it on the host with the real key from 1Password.
 
 ## Build shape
 
@@ -68,10 +68,18 @@ Every stage ends with a command the user runs (Fish) and a pass/fail check. The 
 
 ### Stage 6: Remaining outputs
 
-- Add `apk-x86_64` and `apk-universal`, and set `default` to `apk-arm64`.
-- Check: each builds, and the `x86_64` Rust derivation is the only new compile when `apk-universal` follows `apk-arm64`.
+- `apk-x86_64` and `apk-universal` (debug), built by one `mkApk { buildType, abiNames }` function. The jniLibs directory for a variant is a `symlinkJoin` of the per-ABI Rust outputs.
+- Check: each builds, the `x86_64` Rust derivation is the only new compile when `apk-universal` follows `apk-arm64`, and the `apk-arm64` APK keeps the SHA-256 it had before the refactor.
 
-### Stage 7: Docs
+### Stage 7: Release build with the real key
+
+- Gradle: `-PunsignedRelease=true` builds the release variant without a signing config (and without the signing validation), so AGP emits `app-release-unsigned.apk`. All Nix derivations pass it, so one lockfile covers the debug and release builds; the update task is `:app:assembleDebug :app:assembleRelease`.
+- Nix: `apk-release-<variant>` installs the unsigned output as `reminders-release-UNSIGNED.zip`.
+- Signing: `scripts/sign-release.py <unsigned.zip> <signed.apk>` (standard-library Python, run where `op` is signed in and `apksigner` is on `PATH` or under `$ANDROID_HOME/build-tools`, for example inside `nix develop`). It fetches the `.p12` and its password with `op read` from 1Password, writes the keystore to a private temporary directory (mode 0700, `/dev/shm` when available) that is overwritten and removed on exit, error, Ctrl-C, SIGTERM and SIGHUP, passes the password to `apksigner` through its environment, disables v4 signing, and verifies the result with `apksigner verify --print-certs` before writing the output. The key never enters the Nix store, the sandbox, or the repository.
+- Re-record the lockfile on each system first: the release build resolves artifacts the debug build did not (lint, packaging).
+- Check: sign, verify, install over a previous release build (in-place update), and compare the signed APK's certificate fingerprint with the keystore's.
+
+### Stage 8: Docs
 
 - Update the "Nix build" section of `AGENTS.md` from planned to the real commands and outputs.
 - `README.md` is human-owned and stays untouched unless the user asks.
@@ -97,8 +105,7 @@ The main source of the 2–3 day estimate is risks 1 and 2. Risks 3, 5, and 6 ar
 
 ## Out of scope
 
-- Release builds and signing.
-- Reworking the Gradle-driven flow beyond the prebuilt-input switch.
+- Reworking the Gradle-driven flow beyond the prebuilt-input and unsigned-release switches.
 
 ## Open questions
 
@@ -117,5 +124,6 @@ The main source of the 2–3 day estimate is risks 1 and 2. Risks 3, 5, and 6 ar
 - Stage 3 is done: `nix build .#uniffi-kotlin` generates the Kotlin bindings (formatted with ktlint) from the arm64 library, using a real-copy vendor directory to avoid the askama symlink problem.
 - Stage 4 is verified in the dev shell on `aarch64-darwin`: with `-PprebuiltJniLibs=<reminder-core-arm64>` `-PprebuiltUniffiKotlin=<uniffi-kotlin>` `-PrustAbis=arm64-v8a`, `./gradlew :app:assembleDebug` succeeds, no Rust or bindgen tasks are in the task graph (`--dry-run`), `compileDebugKotlin` uses the prebuilt bindings, and the APK contains `lib/arm64-v8a/libreminder_core.so` (stripped by AGP). Setting only one property fails with "must be set together", and an ABI missing from the prebuilt directory fails with "has no library for ABI". The default Gradle-driven flow (no properties, `-PrustAbis=arm64-v8a`) also still builds: it runs `buildRustDebug` and `generateUniFfiBindingsDebug`. `./gradlew :app:tasks --all` fails with an unrelated AGP 9.5 Compose Preview error and is not usable as a check.
 - Stage 5 works: the lockfile was recorded on `aarch64-darwin` and `nix build .#apk-arm64` produced an APK, and the Arch PC built one that installs on the phone. Comparing the two APKs: all 959 zip entries (dex, resources, `libreminder_core.so`) are identical in name, CRC, size and offset, and only the 1,030 bytes of the APK signing block differ. The signers differ because AGP generated a random debug keystore in each build's temporary `ANDROID_USER_HOME`.
-- Debug signing fix: a fixed `android/app/debug.keystore` (standard debug credentials, alias `androiddebugkey`, password `android`) is committed and configured as `signingConfigs.debug` in `android/app/build.gradle.kts`. The key is public by design for debug builds; release signing stays outside the repo. Not yet rebuilt: expect byte-identical APKs on both hosts and in-place updates on the phone.
-- Next: rebuild on both hosts and compare APK SHA-256, then Stage 6 (`apk-x86_64`, `apk-universal`).
+- Debug signing fix: a fixed `android/app/debug.keystore` (standard debug credentials, alias `androiddebugkey`, password `android`) is committed and configured as `signingConfigs.debug` in `android/app/build.gradle.kts`. The key is public by design for debug builds; release signing stays outside the repo.
+- Confirmed: after the fix, `nix build .#apk-arm64` produces the same SHA-256 on `aarch64-darwin` and `x86_64-linux`. Stage 5 is done for arm64.
+- Stage 6 and 7 are written in `flake.nix` and `android/app/build.gradle.kts` and evaluate on both systems, but nothing has been built: re-record the lockfile (it must now cover `assembleRelease`), rebuild `apk-arm64` and compare its hash with the earlier one, build `apk-x86_64`, `apk-universal` and `apk-release-arm64`, then sign and install.

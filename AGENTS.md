@@ -59,8 +59,8 @@ The goal is to build the APK with Nix so that macOS (`aarch64-darwin`) and Linux
 - The Gradle dependency lockfiles are `nix/deps-<system>.json`. They are generated, not hand-edited: run the script from `nix build .#apk-arm64.mitmCache.updateScript` from the repository root after any Gradle dependency change, on each supported system.
 - Debug APKs are signed with the committed `android/app/debug.keystore` (standard debug credentials) so they are reproducible and update in place. Never reuse that key for release signing.
 - `android/gradle/gradle-daemon-jvm.properties` is removed inside the Nix build so Gradle does not try to download a JDK.
-- ABIs are one parameter shared by the Rust derivations, toolchain targets, and `-PrustAbis`. Planned outputs are `apk-arm64` (default), `apk-x86_64`, and `apk-universal`, with one Rust derivation per ABI so they share cache.
-- The release build is out of scope until the debug build works. Signing must stay outside the sandbox.
+- ABIs are one parameter shared by the Rust derivations, toolchain targets, and `-PrustAbis`. Flake outputs: `reminder-core-<abi>`, `uniffi-kotlin`, and `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`. One Rust derivation per ABI so they share cache.
+- Release APKs are built unsigned by Nix (`-PunsignedRelease=true`, output `reminders-release-UNSIGNED.zip`) and signed on the host with `scripts/sign-release.py <unsigned.zip> <signed.apk>`, which reads the key and password from 1Password with `op read`. The release key lives outside the repo and is never given to Nix or to Gradle in the sandbox.
 - Flakes only see git-tracked files. Remind the user to `git add` new files before running Nix.
 
 Update this section as stages land, and replace "planned" with the actual outputs and commands.

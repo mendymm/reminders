@@ -269,69 +269,120 @@
                   --out-dir "$out"
               '';
 
-          # Debug APK, built by Gradle offline. Rust and the UniFFI bindings come from
-          # the derivations above through the Stage 4 properties. Dependencies are
-          # served from the per-system lockfile in nix/, recorded with
+          # APKs built by Gradle offline. Rust and the UniFFI bindings come from the
+          # derivations above through the Stage 4 properties. Dependencies are served
+          # from the per-system lockfile in nix/, recorded with
           #   nix build .#apk-arm64.mitmCache.updateScript
-          # (run the resulting script from the repository root).
-          apkArm64 = pkgs.stdenv.mkDerivation (finalAttrs: {
-            pname = "reminders-apk-arm64";
-            version = "0.1.0";
-            src = ./android;
+          # (run the resulting script from the repository root). Every variant passes
+          # -PunsignedRelease and uses the same update task, so one lockfile covers
+          # the debug and the unsigned release builds. Release signing happens outside
+          # the sandbox with scripts/sign-release.py.
+          mkApk =
+            { buildType, abiNames }:
+            let
+              isRelease = buildType == "release";
+              jniLibs = pkgs.symlinkJoin {
+                name = "reminder-core-jni-libs-${lib.concatStringsSep "-" abiNames}";
+                paths = map (name: reminderCore.${name}) abiNames;
+              };
+              abis = map (name: androidAbis.${name}.abi) abiNames;
+            in
+            pkgs.stdenv.mkDerivation (finalAttrs: {
+              pname = "reminders-apk-${buildType}-${lib.concatStringsSep "-" abiNames}";
+              version = "0.1.0";
+              src = ./android;
 
-            nativeBuildInputs = [ pkgs.gradle_9 ];
+              nativeBuildInputs = [ pkgs.gradle_9 ];
 
-            mitmCache = pkgs.gradle_9.fetchDeps {
-              pkg = finalAttrs.finalPackage;
-              data = ./nix + "/deps-${system}.json";
-            };
+              mitmCache = pkgs.gradle_9.fetchDeps {
+                pkg = finalAttrs.finalPackage;
+                data = ./nix + "/deps-${system}.json";
+              };
 
-            # The mitm-cache proxy needs local networking on Darwin.
-            __darwinAllowLocalNetworking = true;
+              # The mitm-cache proxy needs local networking on Darwin.
+              __darwinAllowLocalNetworking = true;
 
-            # Gradle would otherwise try to download the daemon JDK from foojay.
-            postPatch = ''
-              rm gradle/gradle-daemon-jvm.properties
-            '';
+              # Gradle would otherwise try to download the daemon JDK from foojay.
+              postPatch = ''
+                rm gradle/gradle-daemon-jvm.properties
+              '';
 
-            env = {
-              ANDROID_HOME = androidSdkRoot;
-              ANDROID_SDK_ROOT = androidSdkRoot;
-            };
+              env = {
+                ANDROID_HOME = androidSdkRoot;
+                ANDROID_SDK_ROOT = androidSdkRoot;
+              };
 
-            preConfigure = ''
-              export HOME="$TMPDIR"
-              export ANDROID_USER_HOME="$TMPDIR/.android"
-            '';
+              preConfigure = ''
+                export HOME="$TMPDIR"
+                export ANDROID_USER_HOME="$TMPDIR/.android"
+              '';
 
-            gradleFlags = [
-              "--no-configuration-cache"
-              "-PprebuiltJniLibs=${reminderCore.arm64}"
-              "-PprebuiltUniffiKotlin=${uniffiKotlin}"
-              "-PrustAbis=${androidAbis.arm64.abi}"
-              "-Pandroid.aapt2FromMavenOverride=${androidSdkRoot}/build-tools/${androidBuildTools}/aapt2"
+              gradleFlags = [
+                "--no-configuration-cache"
+                "-PprebuiltJniLibs=${jniLibs}"
+                "-PprebuiltUniffiKotlin=${uniffiKotlin}"
+                "-PrustAbis=${lib.concatStringsSep "," abis}"
+                "-PunsignedRelease=true"
+                "-Pandroid.aapt2FromMavenOverride=${androidSdkRoot}/build-tools/${androidBuildTools}/aapt2"
+              ];
+              gradleBuildTask = if isRelease then ":app:assembleRelease" else ":app:assembleDebug";
+              # AGP resolves much of its dependency graph while building, so record the
+              # lockfile from the real builds instead of the default resolve-everything task.
+              gradleUpdateTask = ":app:assembleDebug :app:assembleRelease";
+
+              installPhase =
+                if isRelease then
+                  ''
+                    runHook preInstall
+                    mkdir -p "$out"
+                    # Deliberately not named .apk, so an unsigned build can't be installed by mistake.
+                    cp app/build/outputs/apk/release/app-release-unsigned.apk "$out/reminders-release-UNSIGNED.zip"
+                    runHook postInstall
+                  ''
+                else
+                  ''
+                    runHook preInstall
+                    mkdir -p "$out"
+                    cp app/build/outputs/apk/debug/app-debug.apk "$out/reminders-debug.apk"
+                    runHook postInstall
+                  '';
+
+              dontFixup = true;
+            });
+
+          # apk-<variant> is the debug build, apk-release-<variant> the unsigned release.
+          apkVariants = {
+            arm64 = [ "arm64" ];
+            x86_64 = [ "x86_64" ];
+            universal = [
+              "arm64"
+              "x86_64"
             ];
-            gradleBuildTask = ":app:assembleDebug";
-            # AGP resolves much of its dependency graph while building, so record the
-            # lockfile from the real build instead of the default resolve-everything task.
-            gradleUpdateTask = ":app:assembleDebug";
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out"
-              cp app/build/outputs/apk/debug/app-debug.apk "$out/reminders-debug.apk"
-              runHook postInstall
-            '';
-
-            dontFixup = true;
-          });
+          };
+          apkPackages = lib.listToAttrs (
+            lib.concatMap
+              (
+                buildType:
+                lib.mapAttrsToList (
+                  variant: abiNames:
+                  lib.nameValuePair (if buildType == "release" then "apk-release-${variant}" else "apk-${variant}")
+                    (mkApk {
+                      inherit buildType abiNames;
+                    })
+                ) apkVariants
+              )
+              [
+                "debug"
+                "release"
+              ]
+          );
         in
         {
           packages =
             lib.mapAttrs' (name: drv: lib.nameValuePair "reminder-core-${name}" drv) reminderCore
+            // apkPackages
             // {
               uniffi-kotlin = uniffiKotlin;
-              apk-arm64 = apkArm64;
             };
 
           devShells.default = pkgs.mkShell {
