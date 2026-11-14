@@ -1,3 +1,6 @@
+import java.io.File
+import java.nio.file.Files
+import java.security.KeyStore
 import java.util.Locale
 import javax.inject.Inject
 import org.gradle.api.DefaultTask
@@ -151,9 +154,101 @@ abstract class GenerateUniFfiBindings @Inject constructor(
     }
 }
 
+abstract class ValidateReleaseSigning : DefaultTask() {
+    @get:Internal
+    abstract val keystorePath: Property<String>
+
+    @get:Internal
+    abstract val keyAlias: Property<String>
+
+    @get:Internal
+    abstract val keystorePassword: Property<String>
+
+    init {
+        outputs.upToDateWhen { false }
+        notCompatibleWithConfigurationCache(
+            "Release signing credentials are supplied through temporary environment variables",
+        )
+    }
+
+    @TaskAction
+    fun validate() {
+        val path = keystorePath.orNull?.trim().orEmpty()
+        if (path.isEmpty()) {
+            throw GradleException("REMINDERS_RELEASE_KEYSTORE is not set")
+        }
+
+        val keystoreFile = File(path)
+        if (!keystoreFile.isAbsolute) {
+            throw GradleException(
+                "REMINDERS_RELEASE_KEYSTORE must be an absolute path: $path",
+            )
+        }
+        if (!keystoreFile.isFile) {
+            throw GradleException(
+                "Release keystore was not found: ${keystoreFile.absolutePath}",
+            )
+        }
+        if (!keystoreFile.canRead()) {
+            throw GradleException(
+                "Release keystore is not readable: ${keystoreFile.absolutePath}",
+            )
+        }
+
+        val alias = keyAlias.orNull?.trim().orEmpty()
+        if (alias.isEmpty()) {
+            throw GradleException("REMINDERS_RELEASE_KEY_ALIAS is not set")
+        }
+
+        val password = keystorePassword.orNull.orEmpty()
+        if (password.isEmpty()) {
+            throw GradleException("REMINDERS_RELEASE_KEYSTORE_PASSWORD is not set")
+        }
+
+        val store = try {
+            KeyStore.getInstance("PKCS12").apply {
+                Files.newInputStream(keystoreFile.toPath()).use { input ->
+                    load(input, password.toCharArray())
+                }
+            }
+        } catch (error: Exception) {
+            throw GradleException(
+                "Unable to open the release PKCS#12 keystore; check its password and contents",
+                error,
+            )
+        }
+
+        if (!store.isKeyEntry(alias)) {
+            throw GradleException(
+                "Release keystore does not contain a private-key entry named '$alias'",
+            )
+        }
+
+        try {
+            if (store.getKey(alias, password.toCharArray()) == null) {
+                throw GradleException(
+                    "Release keystore entry '$alias' does not contain a private key",
+                )
+            }
+        } catch (error: GradleException) {
+            throw error
+        } catch (error: Exception) {
+            throw GradleException(
+                "Unable to read private-key entry '$alias'; check its password",
+                error,
+            )
+        }
+    }
+}
+
 val pinnedNdkVersion = "30.0.16248370"
 val rustWorkspace = rootProject.layout.projectDirectory.dir("../rust")
 val cargoExecutableProvider = providers.gradleProperty("rustCargo").orElse("cargo")
+val releaseKeystorePath = providers.environmentVariable("REMINDERS_RELEASE_KEYSTORE")
+val releaseKeyAlias = providers.environmentVariable("REMINDERS_RELEASE_KEY_ALIAS")
+val releaseKeystorePassword = providers.environmentVariable(
+    "REMINDERS_RELEASE_KEYSTORE_PASSWORD",
+)
 val rustAbis = providers.gradleProperty("rustAbis")
     .map { value ->
         value.split(',')
@@ -197,12 +292,29 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeType = "PKCS12"
+            releaseKeystorePath.orNull?.let { path ->
+                storeFile = file(path)
+            }
+            releaseKeyAlias.orNull?.let { alias ->
+                keyAlias = alias
+            }
+            releaseKeystorePassword.orNull?.let { password ->
+                storePassword = password
+                keyPassword = password
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
         }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -224,6 +336,16 @@ android {
             useLegacyPackaging = false
         }
     }
+}
+
+val validateReleaseSigning = tasks.register<ValidateReleaseSigning>(
+    "validateReleaseSigningEnvironment",
+) {
+    group = "verification"
+    description = "Validates the external release-signing keystore and credentials"
+    keystorePath.set(releaseKeystorePath.orElse(""))
+    keyAlias.set(releaseKeyAlias.orElse(""))
+    keystorePassword.set(releaseKeystorePassword.orElse(""))
 }
 
 androidComponents.onVariants { variant ->
@@ -251,6 +373,9 @@ androidComponents.onVariants { variant ->
         platform.set(37)
         release.set(isRelease)
         outputDirectory.set(layout.buildDirectory.dir("rustJniLibs/$variantName"))
+        if (isRelease) {
+            dependsOn(validateReleaseSigning)
+        }
     }
 
     val generateBindings = tasks.register<GenerateUniFfiBindings>(
