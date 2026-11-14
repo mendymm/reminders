@@ -1,0 +1,18 @@
+[package]
+name = "reminder-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "reminder_core"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+uniffi = { version = "0.32.2", features = ["cli"] }
+

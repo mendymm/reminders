@@ -1,0 +1,9 @@
+.idea/
+*.iml
+local.properties
+
+rust/target/
+android/.gradle/
+android/build/
+android/app/build/
+

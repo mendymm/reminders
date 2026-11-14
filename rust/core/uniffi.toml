@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "dev.mendy.reminders.core"
+android = true
+
