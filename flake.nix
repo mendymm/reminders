@@ -103,6 +103,51 @@
             ];
           };
 
+          # Cargo hashes the build host's `rustc -vV` (including the host triple) into
+          # the `-C metadata` of host units (build scripts and proc-macros). Target
+          # crates inherit that through their dependencies, so the same source gets
+          # different symbol hashes on different build hosts (rust-lang/cargo#8140).
+          # Replace the value with a hash of inputs that do not depend on the host.
+          rustcWrapper = pkgs.writeShellScript "rustc-stable-metadata" ''
+            set -eu
+            rustc=$1
+            shift
+            args=("$@")
+            key=""
+            meta=""
+            i=0
+            while [ "$i" -lt "''${#args[@]}" ]; do
+              arg=''${args[$i]}
+              case "$arg" in
+                metadata=*)
+                  meta=$i
+                  ;;
+                --crate-name | --crate-type | --edition | --target | --cfg)
+                  i=$((i + 1))
+                  key="$key $arg ''${args[$i]}"
+                  ;;
+                --crate-name=* | --crate-type=* | --edition=* | --target=*)
+                  key="$key $arg"
+                  ;;
+                *.rs)
+                  case "$arg" in
+                    *-vendor-cargo-deps/*)
+                      arg=''${arg#*-vendor-cargo-deps/}
+                      arg=''${arg#*/}
+                      ;;
+                  esac
+                  key="$key $arg"
+                  ;;
+              esac
+              i=$((i + 1))
+            done
+            if [ -n "$meta" ]; then
+              hash=$(printf '%s' "$key" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+              args[$meta]="metadata=$hash"
+            fi
+            exec "$rustc" "''${args[@]}"
+          '';
+
           mkReminderCore =
             { abi, ... }:
             let
@@ -122,6 +167,9 @@
                 nativeBuildInputs = [ pkgs.cargo-ndk ];
                 ANDROID_NDK_HOME = rustNdkHome;
                 buildPhaseCargoCommand = buildCommand;
+                RUSTC_WRAPPER = rustcWrapper;
+                # Remap the build directory in debug info to the source store path.
+                doRemapPathPrefix = true;
               };
               cargoArtifacts = craneLib.buildDepsOnly commonArgs;
             in
@@ -133,6 +181,11 @@
                 # not from a cargo build log.
                 doNotPostBuildInstallCargoBinaries = true;
                 installPhaseCommand = ''
+                  # The linker banner in .comment embeds the NDK's build-host paths.
+                  for lib in jniLibs/*/*.so; do
+                    "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objcopy \
+                      --remove-section=.comment "$lib"
+                  done
                   mkdir -p "$out"
                   cp -r jniLibs/. "$out/"
                 '';
