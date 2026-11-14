@@ -139,8 +139,6 @@ abstract class GenerateUniFfiBindings @Inject constructor(
                 cargoExecutable.get(),
                 "run",
                 "--package",
-                "reminder-core",
-                "--bin",
                 "uniffi-bindgen",
                 "--",
                 "generate",

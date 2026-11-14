@@ -3,31 +3,171 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
-    { nixpkgs, ... }:
+    {
+      nixpkgs,
+      rust-overlay,
+      crane,
+      ...
+    }:
     let
+      inherit (nixpkgs) lib;
+
       systems = [
         "aarch64-darwin"
         "x86_64-linux"
       ];
 
-      forEachSystem = nixpkgs.lib.genAttrs systems;
+      forEachSystem = lib.genAttrs systems;
 
-      pkgsFor =
+      # Android pins. Keep in sync with android/app/build.gradle.kts.
+      androidPlatform = 37;
+      androidPlatformVersion = "37.1";
+      androidBuildTools = "36.0.0";
+      androidNdk = "30.0.16248370";
+
+      # Short name -> Android ABI and Rust target. One Rust derivation is built
+      # per entry so APK variants share the compiled libraries.
+      androidAbis = {
+        arm64 = {
+          abi = "arm64-v8a";
+          target = "aarch64-linux-android";
+        };
+        x86_64 = {
+          abi = "x86_64";
+          target = "x86_64-linux-android";
+        };
+      };
+      rustTargets = lib.mapAttrsToList (_: entry: entry.target) androidAbis;
+
+      perSystem =
         system:
-        import nixpkgs {
-          inherit system;
-          config = {
-            allowUnfree = true;
-            android_sdk.accept_license = true;
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
+          };
+
+          # Full SDK for Gradle and the dev shell. AGP 9.5 defaults to build-tools
+          # 36.0.0 and uses the NDK to strip native libraries during packaging.
+          androidComposition = pkgs.androidenv.composeAndroidPackages {
+            platformVersions = [ androidPlatformVersion ];
+            buildToolsVersions = [ androidBuildTools ];
+            includeNDK = true;
+            ndkVersions = [ androidNdk ];
+          };
+          androidSdk = androidComposition.androidsdk;
+          androidSdkRoot = "${androidSdk}/libexec/android-sdk";
+          androidNdkHome = "${androidSdkRoot}/ndk/${androidNdk}";
+
+          # NDK-only SDK for the Rust derivations, so changing the Gradle-side SDK
+          # components does not rebuild the Rust crates.
+          rustNdkComposition = pkgs.androidenv.composeAndroidPackages {
+            platformVersions = [ ];
+            buildToolsVersions = [ ];
+            includeCmake = false;
+            includeNDK = true;
+            ndkVersions = [ androidNdk ];
+          };
+          rustNdkHome = "${rustNdkComposition.androidsdk}/libexec/android-sdk/ndk/${androidNdk}";
+
+          buildToolchain = pkgs.rust-bin.stable.latest.minimal.override {
+            targets = rustTargets;
+          };
+          devToolchain = pkgs.rust-bin.stable.latest.default.override {
+            targets = rustTargets;
+            extensions = [ "rust-src" ];
+          };
+
+          craneLib = (crane.mkLib pkgs).overrideToolchain buildToolchain;
+
+          # The Cargo workspace. uniffi.toml is kept because bindgen reads it.
+          rustSrc = lib.fileset.toSource {
+            root = ./rust;
+            fileset = lib.fileset.unions [
+              (craneLib.fileset.commonCargoSources ./rust)
+              ./rust/core/uniffi.toml
+            ];
+          };
+
+          mkReminderCore =
+            { abi, ... }:
+            let
+              buildCommand = ''
+                cargo ndk \
+                  --platform ${toString androidPlatform} \
+                  --target ${abi} \
+                  --output-dir "$PWD/jniLibs" \
+                  build --package reminder-core --release
+              '';
+              commonArgs = {
+                src = rustSrc;
+                pname = "reminder-core-${abi}";
+                version = "0.1.0";
+                strictDeps = true;
+                doCheck = false;
+                nativeBuildInputs = [ pkgs.cargo-ndk ];
+                ANDROID_NDK_HOME = rustNdkHome;
+                buildPhaseCargoCommand = buildCommand;
+              };
+              cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            in
+            craneLib.buildPackage (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                # Binaries are installed by installPhaseCommand from cargo-ndk's output,
+                # not from a cargo build log.
+                doNotPostBuildInstallCargoBinaries = true;
+                installPhaseCommand = ''
+                  mkdir -p "$out"
+                  cp -r jniLibs/. "$out/"
+                '';
+              }
+            );
+        in
+        {
+          packages = lib.mapAttrs' (
+            name: entry: lib.nameValuePair "reminder-core-${name}" (mkReminderCore entry)
+          ) androidAbis;
+
+          devShells.default = pkgs.mkShell {
+            packages = [
+              androidSdk
+              pkgs.jdk25
+              devToolchain
+              pkgs.cargo-ndk
+              pkgs.just
+              pkgs.nixfmt
+              pkgs.deadnix
+              pkgs.statix
+              pkgs.nix-output-monitor
+            ];
+
+            ANDROID_HOME = androidSdkRoot;
+            ANDROID_SDK_ROOT = androidSdkRoot;
+            ANDROID_NDK_HOME = androidNdkHome;
           };
         };
+
+      outputs = forEachSystem perSystem;
+      pick = name: lib.mapAttrs (_: perSystemOutputs: perSystemOutputs.${name}) outputs;
     in
     {
-      # Filled in by later stages of NIX_PLAN.md: toolchain, per-ABI Rust
-      # derivations, UniFFI bindings, APK derivations, and the dev shell.
-      packages = forEachSystem (_system: { });
+      packages = pick "packages";
+      devShells = pick "devShells";
     };
 }

@@ -1,11 +1,14 @@
 [workspace]
-members = ["core"]
+members = ["core", "uniffi-bindgen"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
+[workspace.dependencies]
+uniffi = "0.32.2"
 
 [profile.dev]
 opt-level = 1

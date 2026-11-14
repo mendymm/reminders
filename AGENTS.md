@@ -29,6 +29,8 @@ The Rust core is exposed to Kotlin through UniFFI. Gradle owns the Android pipel
 Gradle -> cargo-ndk -> libreminder_core.so -> UniFFI bindgen -> Kotlin -> Compose
 ```
 
+`rust/` is a workspace with two crates: `core` (`reminder-core`, the library exposed through UniFFI) and `uniffi-bindgen` (a small binary crate that depends on `uniffi` with the `cli` feature). Keep `uniffi/cli` out of `core` so the Android library does not compile the bindgen toolchain. Both crates share the UniFFI version through `[workspace.dependencies]`.
+
 The initial `ping()` milestone has passed end to end. `./gradlew :app:assembleDebug` completed successfully, including Rust compilation, UniFFI binding generation, Kotlin compilation, and APK assembly. UniFFI emitted a harmless warning because ktlint is not installed; optional generated-code formatting may be configured later.
 
 ## Current toolchain
@@ -50,8 +52,8 @@ The debug APK is written to `android/app/build/outputs/apk/debug/`.
 The goal is to build the APK with Nix so that macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. Decisions made so far:
 
 - nixpkgs unstable, with `rust-overlay` and `crane`. Only `aarch64-darwin` and `x86_64-linux` are supported.
-- The Android SDK and NDK come from `androidenv.composeAndroidPackages`, pinned to the versions listed under Current toolchain where nixpkgs has them.
-- The `nixpkgs` Gradle must be 9.x. Gradle 8 is not acceptable.
+- The Android SDK and NDK come from `androidenv.composeAndroidPackages`: platform 37.1 and NDK 30.0.16248370 as listed under Current toolchain, plus build-tools 36.0.0 (AGP 9.5's default and minimum). The Rust derivations use a separate NDK-only composition so SDK changes do not rebuild the Rust crates.
+- Use `pkgs.gradle_9` (9.8.2 at the locked nixpkgs revision; AGP 9.5 needs 9.6.0 or later) with `jdk25`. The default `pkgs.gradle` is Gradle 8 and must not be used.
 - The pure build is a derivation chain: per-ABI `reminder-core` `.so` files, then UniFFI Kotlin bindings, then an offline Gradle APK build with dependencies locked by `gradle.fetchDeps` (`deps.json`, likely per system).
 - Inside the Nix build, Gradle receives the prebuilt `.so` files and bindings through Gradle properties instead of running `cargo ndk` and `uniffi-bindgen` itself. The existing Gradle-driven flow stays as the default when those properties are unset.
 - `android/gradle/gradle-daemon-jvm.properties` is removed inside the Nix build so Gradle does not try to download a JDK.
