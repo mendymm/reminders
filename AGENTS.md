@@ -5,6 +5,7 @@
 - `README.md` is human-owned. Do not add to or edit it unless the user explicitly asks.
 - Never run Cargo commands.
 - Do not run Gradle builds or tool installation commands; give those commands to the user to run.
+- Do not run `nix` commands (`nix build`, `nix develop`, `nix flake lock`, and so on); give them to the user to run.
 - Ask before running any command that changes files, dependencies, installed tools, or other state unless the user has explicitly authorized that specific change.
 - The user uses Fish shell. Commands intended for the user must use Fish syntax.
 - Use `apply_patch` for authorized file edits.
@@ -43,6 +44,22 @@ The initial `ping()` milestone has passed end to end. `./gradlew :app:assembleDe
 The app builds `arm64-v8a` and `x86_64` by default. A phone-only build can use `-PrustAbis=arm64-v8a`.
 
 The debug APK is written to `android/app/build/outputs/apk/debug/`.
+
+## Nix build (planned, not implemented yet)
+
+The goal is to build the APK with Nix so that macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. Decisions made so far:
+
+- nixpkgs unstable, with `rust-overlay` and `crane`. Only `aarch64-darwin` and `x86_64-linux` are supported.
+- The Android SDK and NDK come from `androidenv.composeAndroidPackages`, pinned to the versions listed under Current toolchain where nixpkgs has them.
+- The `nixpkgs` Gradle must be 9.x. Gradle 8 is not acceptable.
+- The pure build is a derivation chain: per-ABI `reminder-core` `.so` files, then UniFFI Kotlin bindings, then an offline Gradle APK build with dependencies locked by `gradle.fetchDeps` (`deps.json`, likely per system).
+- Inside the Nix build, Gradle receives the prebuilt `.so` files and bindings through Gradle properties instead of running `cargo ndk` and `uniffi-bindgen` itself. The existing Gradle-driven flow stays as the default when those properties are unset.
+- `android/gradle/gradle-daemon-jvm.properties` is removed inside the Nix build so Gradle does not try to download a JDK.
+- ABIs are one parameter shared by the Rust derivations, toolchain targets, and `-PrustAbis`. Planned outputs are `apk-arm64` (default), `apk-x86_64`, and `apk-universal`, with one Rust derivation per ABI so they share cache.
+- The release build is out of scope until the debug build works. Signing must stay outside the sandbox.
+- Flakes only see git-tracked files. Remind the user to `git add` new files before running Nix.
+
+Update this section as stages land, and replace "planned" with the actual outputs and commands.
 
 ## Architecture direction
 
