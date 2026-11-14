@@ -1,0 +1,4 @@
+{
+  "!comment": "This is a Nixpkgs Gradle dependency lockfile. For more details, refer to the Gradle section in the Nixpkgs manual.",
+  "!version": 1
+}

@@ -61,8 +61,9 @@ Every stage ends with a command the user runs (Fish) and a pass/fail check. The 
 
 ### Stage 5: Offline APK build
 
-- `apk` derivation using `gradle.fetchDeps` with `deps.json`, generated per system if needed.
-- Handle the read-only SDK problem.
+- `apk-arm64` derivation in `flake.nix`: `gradle_9` with `gradle.fetchDeps`, lockfiles `nix/deps-<system>.json` (one per system). Gradle receives the Stage 4 properties, `--no-configuration-cache`, and `-Pandroid.aapt2FromMavenOverride` pointing at the SDK's `build-tools/36.0.0/aapt2`. `gradle-daemon-jvm.properties` is removed in `postPatch`. The update task is `:app:assembleDebug` so the lockfile is recorded from the real build.
+- The lockfiles in `nix/` start empty (`{"!version": 1}`) and are overwritten by the update script. Record with `nix build .#apk-arm64.mitmCache.updateScript` and run the resulting script from the repository root (it writes `nix/deps-<system>.json` relative to the current directory).
+- Read-only SDK handling is not in the derivation yet; add a writable copy only if the sandbox build needs it.
 - Check: `nix build .#apk-arm64`, confirm the APK in `result`, install it on the phone.
 
 ### Stage 6: Remaining outputs
@@ -115,4 +116,5 @@ The main source of the 2–3 day estimate is risks 1 and 2. Risks 3, 5, and 6 ar
 - Confirmed: with the path remaps added to the `RUSTC_WRAPPER`, `reminder-core-arm64` built on `aarch64-darwin` and on `x86_64-linux` is byte-identical (same SHA-256, 5,682,008 bytes). Only arm64 has been compared; the `x86_64` ABI has not been built.
 - Stage 3 is done: `nix build .#uniffi-kotlin` generates the Kotlin bindings (formatted with ktlint) from the arm64 library, using a real-copy vendor directory to avoid the askama symlink problem.
 - Stage 4 is verified in the dev shell on `aarch64-darwin`: with `-PprebuiltJniLibs=<reminder-core-arm64>` `-PprebuiltUniffiKotlin=<uniffi-kotlin>` `-PrustAbis=arm64-v8a`, `./gradlew :app:assembleDebug` succeeds, no Rust or bindgen tasks are in the task graph (`--dry-run`), `compileDebugKotlin` uses the prebuilt bindings, and the APK contains `lib/arm64-v8a/libreminder_core.so` (stripped by AGP). Setting only one property fails with "must be set together", and an ABI missing from the prebuilt directory fails with "has no library for ABI". The default Gradle-driven flow (no properties, `-PrustAbis=arm64-v8a`) also still builds: it runs `buildRustDebug` and `generateUniFfiBindingsDebug`. `./gradlew :app:tasks --all` fails with an unrelated AGP 9.5 Compose Preview error and is not usable as a check.
-- Next: Stage 5 (offline Gradle APK build).
+- Stage 5 is written (`apk-arm64`, `nix/deps-*.json`) and evaluates, but nothing has been recorded or built yet.
+- Next: record the lockfile on `aarch64-darwin`, run `nix build .#apk-arm64`, fix gaps, then repeat on `x86_64-linux`.

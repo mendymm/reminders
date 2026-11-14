@@ -268,12 +268,70 @@
                   --language kotlin \
                   --out-dir "$out"
               '';
+
+          # Debug APK, built by Gradle offline. Rust and the UniFFI bindings come from
+          # the derivations above through the Stage 4 properties. Dependencies are
+          # served from the per-system lockfile in nix/, recorded with
+          #   nix build .#apk-arm64.mitmCache.updateScript
+          # (run the resulting script from the repository root).
+          apkArm64 = pkgs.stdenv.mkDerivation (finalAttrs: {
+            pname = "reminders-apk-arm64";
+            version = "0.1.0";
+            src = ./android;
+
+            nativeBuildInputs = [ pkgs.gradle_9 ];
+
+            mitmCache = pkgs.gradle_9.fetchDeps {
+              pkg = finalAttrs.finalPackage;
+              data = ./nix + "/deps-${system}.json";
+            };
+
+            # The mitm-cache proxy needs local networking on Darwin.
+            __darwinAllowLocalNetworking = true;
+
+            # Gradle would otherwise try to download the daemon JDK from foojay.
+            postPatch = ''
+              rm gradle/gradle-daemon-jvm.properties
+            '';
+
+            env = {
+              ANDROID_HOME = androidSdkRoot;
+              ANDROID_SDK_ROOT = androidSdkRoot;
+            };
+
+            preConfigure = ''
+              export HOME="$TMPDIR"
+              export ANDROID_USER_HOME="$TMPDIR/.android"
+            '';
+
+            gradleFlags = [
+              "--no-configuration-cache"
+              "-PprebuiltJniLibs=${reminderCore.arm64}"
+              "-PprebuiltUniffiKotlin=${uniffiKotlin}"
+              "-PrustAbis=${androidAbis.arm64.abi}"
+              "-Pandroid.aapt2FromMavenOverride=${androidSdkRoot}/build-tools/${androidBuildTools}/aapt2"
+            ];
+            gradleBuildTask = ":app:assembleDebug";
+            # AGP resolves much of its dependency graph while building, so record the
+            # lockfile from the real build instead of the default resolve-everything task.
+            gradleUpdateTask = ":app:assembleDebug";
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              cp app/build/outputs/apk/debug/app-debug.apk "$out/reminders-debug.apk"
+              runHook postInstall
+            '';
+
+            dontFixup = true;
+          });
         in
         {
           packages =
             lib.mapAttrs' (name: drv: lib.nameValuePair "reminder-core-${name}" drv) reminderCore
             // {
               uniffi-kotlin = uniffiKotlin;
+              apk-arm64 = apkArm64;
             };
 
           devShells.default = pkgs.mkShell {
