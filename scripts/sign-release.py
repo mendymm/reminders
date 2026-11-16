@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Sign an unsigned release APK with the release key stored in 1Password.
+"""Sign an unsigned release APK with the release key.
 
 Usage:
     scripts/sign-release.py <unsigned.zip> <signed.apk> [--alias ALIAS] [--force]
 
-The release keystore (.p12) and its password are read from 1Password with
-`op read`. The keystore is written to a private temporary directory (mode 0700,
-on /dev/shm when available) that is overwritten and removed when the script
-finishes, including on errors, Ctrl-C, and SIGTERM/SIGHUP. The password is only
-held in memory and is handed to apksigner through its environment, never on a
-command line. Nothing secret is printed.
+Where the key comes from is chosen by the environment:
 
-Run it where the `op` CLI is signed in and `apksigner` is available, either on
-PATH or in $ANDROID_HOME/build-tools/*/ (as in `nix develop`). Only the Python
-standard library is used.
+* REMINDERS_RELEASE_KEYSTORE set (CI, or any caller that already has the key):
+  it is the path of the PKCS12 keystore, and REMINDERS_RELEASE_KEYSTORE_PASSWORD
+  must hold its password. 1Password is never contacted and no `op` binary is
+  needed. These are the same variables the Gradle build uses.
+* REMINDERS_RELEASE_KEYSTORE unset (local use): the keystore (.p12) and its
+  password are read from 1Password with `op read`. The keystore is written to a
+  private temporary directory (mode 0700, on /dev/shm when available) that is
+  overwritten and removed when the script finishes, including on errors, Ctrl-C,
+  and SIGTERM/SIGHUP. The password is only held in memory.
+
+In both modes the password reaches apksigner through its environment, never a
+command line, and nothing secret is printed. The signed APK is written next to
+its destination first and moved into place only after it verifies.
+
+Needs `apksigner` on PATH or in $ANDROID_HOME/build-tools/*/ (as in `nix develop`
+or a GitHub-hosted runner). Only the Python standard library is used.
 """
 
 from __future__ import annotations
@@ -31,7 +39,8 @@ from pathlib import Path
 KEYSTORE_REFERENCE = "op://Personal/reminders app android release keystore /reminders-release.p12"
 PASSWORD_REFERENCE = "op://Personal/reminders app android release keystore /p12 enc password"
 DEFAULT_ALIAS = "reminders-release"
-PASSWORD_ENV_VAR = "REMINDERS_KEYSTORE_PASSWORD"
+KEYSTORE_ENV_VAR = "REMINDERS_RELEASE_KEYSTORE"
+PASSWORD_ENV_VAR = "REMINDERS_RELEASE_KEYSTORE_PASSWORD"
 # Keep in sync with minSdk in android/app/build.gradle.kts. It is passed to apksigner
 # explicitly instead of letting it read the manifest.
 MIN_SDK_VERSION = "37"
@@ -110,26 +119,17 @@ def run_op(op: str, arguments: list[str], description: str) -> subprocess.Comple
     return result
 
 
-def sign(unsigned: Path, destination: Path, alias: str) -> None:
-    op = find_tool("op")
-    apksigner = find_tool("apksigner", apksigner_candidates())
-
-    workdir = Path(tempfile.mkdtemp(prefix="reminders-sign-", dir=private_temp_root()))
+def run_apksigner(
+    apksigner: str,
+    keystore: Path,
+    alias: str,
+    unsigned: Path,
+    destination: Path,
+    environment: dict[str, str],
+) -> None:
+    """Sign, verify, then move into place. `environment` must hold PASSWORD_ENV_VAR."""
+    partial = destination.with_name(destination.name + ".partial")
     try:
-        keystore = workdir / "release.p12"
-        signed_tmp = workdir / "signed.apk"
-
-        print("Fetching the keystore from 1Password...", file=sys.stderr)
-        run_op(
-            op,
-            ["read", "--force", "--file-mode", "0600", "--out-file", str(keystore), KEYSTORE_REFERENCE],
-            "keystore",
-        )
-
-        print("Fetching the keystore password from 1Password...", file=sys.stderr)
-        password = run_op(op, ["read", "--no-newline", PASSWORD_REFERENCE], "password").stdout.decode()
-
-        environment = {**os.environ, PASSWORD_ENV_VAR: password}
         print(f"Signing {unsigned}...", file=sys.stderr)
         signed = subprocess.run(
             [
@@ -154,13 +154,12 @@ def sign(unsigned: Path, destination: Path, alias: str) -> None:
                 "--lib-page-alignment", LIB_PAGE_ALIGNMENT,
                 # Never sign a debuggable APK with the production key.
                 "--debuggable-apk-permitted", "false",
-                "--out", str(signed_tmp),
+                "--out", str(partial),
                 str(unsigned),
             ],
             env=environment,
             check=False,
         )
-        del password, environment
         if signed.returncode != 0:
             raise SigningError("apksigner sign failed")
 
@@ -172,21 +171,66 @@ def sign(unsigned: Path, destination: Path, alias: str) -> None:
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version", MIN_SDK_VERSION,
-                str(signed_tmp),
+                str(partial),
             ],
             check=False,
         )
         if verified.returncode != 0:
             raise SigningError("apksigner verify failed")
 
-        shutil.move(str(signed_tmp), destination)
+        os.replace(partial, destination)
         print(f"Wrote {destination}", file=sys.stderr)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def sign_with_environment(apksigner: str, keystore_path: str, unsigned: Path, destination: Path, alias: str) -> None:
+    keystore = Path(keystore_path)
+    if not keystore.is_file():
+        raise SigningError(f"{KEYSTORE_ENV_VAR} is not a file: {keystore}")
+    if not os.environ.get(PASSWORD_ENV_VAR):
+        raise SigningError(f"{PASSWORD_ENV_VAR} must be set when {KEYSTORE_ENV_VAR} is")
+    print(f"Using the keystore from ${KEYSTORE_ENV_VAR}.", file=sys.stderr)
+    run_apksigner(apksigner, keystore, alias, unsigned, destination, dict(os.environ))
+
+
+def sign_with_1password(apksigner: str, unsigned: Path, destination: Path, alias: str) -> None:
+    op = find_tool("op")
+    workdir = Path(tempfile.mkdtemp(prefix="reminders-sign-", dir=private_temp_root()))
+    try:
+        keystore = workdir / "release.p12"
+
+        print("Fetching the keystore from 1Password...", file=sys.stderr)
+        run_op(
+            op,
+            ["read", "--force", "--file-mode", "0600", "--out-file", str(keystore), KEYSTORE_REFERENCE],
+            "keystore",
+        )
+
+        print("Fetching the keystore password from 1Password...", file=sys.stderr)
+        password = run_op(op, ["read", "--no-newline", PASSWORD_REFERENCE], "password").stdout.decode()
+
+        environment = {**os.environ, PASSWORD_ENV_VAR: password}
+        del password
+        run_apksigner(apksigner, keystore, alias, unsigned, destination, environment)
     finally:
         clean_up(workdir)
 
 
+def sign(unsigned: Path, destination: Path, alias: str) -> None:
+    apksigner = find_tool("apksigner", apksigner_candidates())
+    keystore_path = os.environ.get(KEYSTORE_ENV_VAR)
+    if keystore_path:
+        sign_with_environment(apksigner, keystore_path, unsigned, destination, alias)
+    else:
+        sign_with_1password(apksigner, unsigned, destination, alias)
+
+
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sign an unsigned release APK with the key in 1Password.")
+    parser = argparse.ArgumentParser(
+        description=f"Sign an unsigned release APK. Uses ${KEYSTORE_ENV_VAR} and ${PASSWORD_ENV_VAR} when "
+        f"${KEYSTORE_ENV_VAR} is set, otherwise the key in 1Password."
+    )
     parser.add_argument("unsigned", type=Path, help="unsigned APK (for example reminders-release-UNSIGNED.zip)")
     parser.add_argument("signed", type=Path, help="where to write the signed .apk")
     parser.add_argument(
