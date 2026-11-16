@@ -1,0 +1,16 @@
+# Config for the F-Droid repo that .github/workflows/release.yml regenerates on each release.
+# Secrets are read from the environment, so this file is safe to commit.
+# The repo lives at https://mendymm.github.io/reminders/fdroid/repo (GitHub Pages).
+
+repo_url: https://mendymm.github.io/reminders/fdroid/repo
+repo_name: Reminders
+repo_description: >-
+  Release builds of Reminders, a personal reminder app.
+
+# The index signing key. It is separate from the APK release key and is created
+# once by hand; users pin its fingerprint in the repo URL.
+repo_keyalias: fdroidrepo
+keystore: keystore.p12
+# PKCS#12 uses one password for the store and the key.
+keystorepass: {env: REMINDERS_FDROID_KEYSTORE_PASSWORD}
+keypass: {env: REMINDERS_FDROID_KEYSTORE_PASSWORD}

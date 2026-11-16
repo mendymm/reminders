@@ -1,14 +1,21 @@
-# Builds the universal release APK on a tag push, signs it, and publishes a GitHub release.
+# Builds the universal release APK on a tag push, signs it, publishes a GitHub release,
+# and refreshes the F-Droid repo on GitHub Pages.
 #
-# Three jobs keep the key and the write token apart:
+# Five jobs keep the keys and the write tokens apart:
 #   build    builds with Nix; has no secrets
-#   sign     has the `release` environment's secrets and a read-only token; runs no Nix
-#   publish  has `contents: write`; never sees the key
+#   sign     has the APK signing key and a read-only token; runs no Nix
+#   publish  has `contents: write`; never sees a key
+#   index    has the F-Droid repo signing key and a read-only token; installs its tool
+#            before the key is written and removes the key before any later action runs
+#   deploy   has Pages permissions; never sees a key
 #
 # The `release` environment must hold:
-#   REMINDERS_RELEASE_KEYSTORE_B64        the .p12, base64-encoded
+#   REMINDERS_RELEASE_KEYSTORE_B64        the APK signing .p12, base64-encoded
 #   REMINDERS_RELEASE_KEYSTORE_PASSWORD   its password
-# and should only allow deployments from `v*` tags.
+#   REMINDERS_FDROID_KEYSTORE_B64         the F-Droid repo index signing .p12, base64-encoded
+#   REMINDERS_FDROID_KEYSTORE_PASSWORD    its password
+# and should only allow deployments from `v*` tags. The `github-pages` environment must
+# also allow `v*` tags, because it only allows the default branch by default.
 
 name: release
 
@@ -132,3 +139,88 @@ jobs:
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
+
+  index:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v23
+
+      # fdroidserver comes from the nixpkgs revision locked in flake.lock.
+      - name: Build fdroidserver
+        run: nix build --inputs-from . nixpkgs#fdroidserver --out-link fdroidserver-tool --print-build-logs
+
+      # The index lists every release, so collect every APK this workflow has published.
+      - name: Download the published APKs
+        run: |
+          mkdir -p fdroid/repo
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName \
+            --jq '.[].tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))')
+          for tag in $tags; do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'reminders-v*.apk' --dir fdroid/repo
+          done
+          ls -l fdroid/repo
+
+      - name: Put the pinned Android build-tools on PATH
+        run: |
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          for tool in apksigner aapt2; do
+            test -x "$build_tools/$tool" || { echo "missing $build_tools/$tool" >&2; exit 1; }
+          done
+          echo "$build_tools" >> "$GITHUB_PATH"
+
+      - name: Write the repo keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.REMINDERS_FDROID_KEYSTORE_B64 }}
+        run: |
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 -d > fdroid/keystore.p12
+
+      - name: Generate and sign the F-Droid index
+        working-directory: fdroid
+        env:
+          REMINDERS_FDROID_KEYSTORE_PASSWORD: ${{ secrets.REMINDERS_FDROID_KEYSTORE_PASSWORD }}
+        run: |
+          chmod 600 config.yml
+          ../fdroidserver-tool/bin/fdroid update --verbose
+
+      # Removed before any further third-party action runs.
+      - name: Remove the repo keystore
+        if: always()
+        run: shred -u fdroid/keystore.p12 2>/dev/null || rm -f fdroid/keystore.p12
+
+      - name: Check the index lists this release
+        run: python3 scripts/check-release-version.py "$GITHUB_REF_NAME" --fdroid-index fdroid/repo/index-v2.json
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site/fdroid
+          cp -r fdroid/repo site/fdroid/repo
+
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: index
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1

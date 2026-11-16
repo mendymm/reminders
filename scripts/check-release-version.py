@@ -2,13 +2,14 @@
 """Check that a release tag matches the app's version.
 
 Usage:
-    scripts/check-release-version.py vX.Y.Z [--apk APK [--aapt2 AAPT2]]
+    scripts/check-release-version.py vX.Y.Z [--apk APK [--aapt2 AAPT2]] [--fdroid-index INDEX]
 
 The version lives in `[workspace.package] version` of rust/Cargo.toml. The Gradle
 build reads versionName from it and derives versionCode from it, so the tag only
 has to match that one file. With --apk the built artifact is checked as well:
 `aapt2 dump badging` must report the tag's version as versionName and the derived
-versionCode.
+versionCode. With --fdroid-index the F-Droid repo's index-v2.json must list that
+versionCode for the app.
 
 Needs Python 3.11+ (tomllib) and, for --apk, aapt2 on PATH or given by --aapt2
 (it ships in the Android SDK build-tools).
@@ -17,6 +18,7 @@ Needs Python 3.11+ (tomllib) and, for --apk, aapt2 on PATH or given by --aapt2
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -26,6 +28,8 @@ from pathlib import Path
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "rust" / "Cargo.toml"
 TAG_PATTERN = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+# Keep in sync with applicationId in android/app/build.gradle.kts.
+APPLICATION_ID = "dev.mendy.reminders"
 
 
 class CheckError(Exception):
@@ -81,12 +85,27 @@ def check_apk(aapt2: str, apk: Path, version: str, version_code: int) -> None:
         raise CheckError(f"{apk} has versionCode {code.group(1)}, expected {version_code}")
 
 
+def check_fdroid_index(index: Path, version_code: int) -> None:
+    try:
+        data = json.loads(index.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise CheckError(f"cannot read {index}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise CheckError(f"{index} is not valid JSON: {error}") from error
+    versions = data.get("packages", {}).get(APPLICATION_ID, {}).get("versions", {})
+    codes = {entry.get("manifest", {}).get("versionCode") for entry in versions.values()}
+    if version_code not in codes:
+        listed = sorted(code for code in codes if code is not None)
+        raise CheckError(f"{index} lists versionCodes {listed} for {APPLICATION_ID}, expected {version_code}")
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check that a release tag matches the app version.")
     parser.add_argument("tag", help="the tag, for example v0.1.0")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="Cargo workspace manifest")
     parser.add_argument("--apk", type=Path, help="also check this built APK with aapt2")
     parser.add_argument("--aapt2", default="aapt2", help="aapt2 binary for --apk (default: aapt2 from PATH)")
+    parser.add_argument("--fdroid-index", type=Path, help="also check this F-Droid index-v2.json")
     return parser.parse_args()
 
 
@@ -104,6 +123,9 @@ def main() -> int:
                 raise CheckError(f"`{arguments.aapt2}` was not found on PATH")
             check_apk(aapt2, arguments.apk, version, version_code)
             print(f"{arguments.apk} has versionName {version} and versionCode {version_code}")
+        if arguments.fdroid_index:
+            check_fdroid_index(arguments.fdroid_index, version_code)
+            print(f"{arguments.fdroid_index} lists versionCode {version_code} for {APPLICATION_ID}")
     except CheckError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

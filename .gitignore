@@ -8,3 +8,11 @@ android/build/
 android/app/build/
 
 result
+
+fdroid/repo/
+fdroid/archive/
+fdroid/tmp/
+fdroid/unsigned/
+fdroid/keystore.p12
+fdroidserver-tool
+site/

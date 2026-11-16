@@ -1,0 +1,8 @@
+Name: Reminders
+Summary: A personal reminder app
+Description: |-
+  Reminders is a personal Android reminder app.
+
+  Builds in this repo are the same signed release APKs published on GitHub.
+SourceCode: https://github.com/mendymm/reminders
+IssueTracker: https://github.com/mendymm/reminders/issues
