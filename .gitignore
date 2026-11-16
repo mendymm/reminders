@@ -13,6 +13,7 @@ fdroid/repo/
 fdroid/archive/
 fdroid/tmp/
 fdroid/unsigned/
+fdroid/fingerprint.txt
 fdroid/keystore.p12
 fdroidserver-tool
 site/

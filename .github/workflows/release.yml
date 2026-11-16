@@ -194,6 +194,19 @@ jobs:
           chmod 600 config.yml
           ../fdroidserver-tool/bin/fdroid update --verbose
 
+      # The fingerprint is public: it is what users pin in the repo URL.
+      - name: Read the repo key fingerprint
+        working-directory: fdroid
+        env:
+          REMINDERS_FDROID_KEYSTORE_PASSWORD: ${{ secrets.REMINDERS_FDROID_KEYSTORE_PASSWORD }}
+        run: |
+          keytool -exportcert -keystore keystore.p12 -alias fdroidrepo \
+            -storepass:env REMINDERS_FDROID_KEYSTORE_PASSWORD \
+            | openssl x509 -inform DER -noout -fingerprint -sha256 \
+            | sed 's/.*=//; s/://g' > fingerprint.txt
+          grep -Eqx '[0-9A-F]{64}' fingerprint.txt
+          cat fingerprint.txt >> "$GITHUB_STEP_SUMMARY"
+
       # Removed before any further third-party action runs.
       - name: Remove the repo keystore
         if: always()
@@ -202,10 +215,17 @@ jobs:
       - name: Check the index lists this release
         run: python3 scripts/check-release-version.py "$GITHUB_REF_NAME" --fdroid-index fdroid/repo/index-v2.json
 
-      - name: Assemble the site
+      # qrencode comes from the same locked nixpkgs as fdroidserver.
+      - name: Assemble the site with the add-repo QR code
         run: |
           mkdir -p site/fdroid
           cp -r fdroid/repo site/fdroid/repo
+          repo_url=$(sed -n 's/^repo_url: *//p' fdroid/config.yml)
+          fingerprint=$(cat fdroid/fingerprint.txt)
+          link="$repo_url?fingerprint=$fingerprint"
+          nix shell --inputs-from . nixpkgs#qrencode --command qrencode -t SVG -m 2 -o site/qr.svg "$link"
+          sed -e "s|@REPO_URL@|$repo_url|g" -e "s|@FINGERPRINT@|$fingerprint|g" -e "s|@LINK@|$link|g" \
+            fdroid/index.template.html > site/index.html
 
       - uses: actions/upload-pages-artifact@v5.0.0
         with:
