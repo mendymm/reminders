@@ -400,6 +400,17 @@
               uniffi-kotlin = uniffiKotlin;
             };
 
+          # `nix run .#sync-gradle-deps` from the repository root re-records this system's
+          # Gradle lockfile (nix/deps-<system>.json). The lockfile does not depend on the
+          # variant (every variant shares it and its update task), so the arm64 variant is
+          # used because it builds only one Rust ABI first. The script writes the lockfile
+          # relative to the current directory, which is why it must run from the repo root.
+          apps.sync-gradle-deps = {
+            type = "app";
+            program = "${apkPackages.apk-arm64.mitmCache.updateScript}";
+            meta.description = "Re-record this system's Gradle dependency lockfile in nix/";
+          };
+
           devShells.default = pkgs.mkShell {
             packages = [
               androidSdk
@@ -426,5 +437,6 @@
     {
       packages = pick "packages";
       devShells = pick "devShells";
+      apps = pick "apps";
     };
 }
