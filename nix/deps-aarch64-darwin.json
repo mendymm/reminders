@@ -1537,6 +1537,10 @@
   "org/tensorflow#tensorflow-lite-metadata/0.2.0": {
    "jar": "sha256-6fGLikHwF+kDPLDthciiuiMHKSzf4l6uNlkj56MdKnA=",
    "pom": "sha256-D+MTJug7diLLzZx11GeykfAf/jzG4+dmUawFocHHo2A="
+  },
+  "org/tomlj#tomlj/2.2.0": {
+   "jar": "sha256-4fyYc087QoW0+H0fH0czAMg3kfL7QG/rhrymfjcYluc=",
+   "pom": "sha256-dMb+cvTih0OMDTxLmVPuYjyERZ6nGgW/dw5FmIVEL1o="
   }
  }
 }

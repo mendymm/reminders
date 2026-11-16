@@ -293,7 +293,16 @@
             pkgs.stdenv.mkDerivation (finalAttrs: {
               pname = "reminders-apk-${buildType}-${lib.concatStringsSep "-" abiNames}";
               version = appVersion;
-              src = ./android;
+              # The Gradle build reads the app version from ../rust/Cargo.toml, so that one file
+              # is included next to the Android project. Other Rust edits don't invalidate this.
+              src = lib.fileset.toSource {
+                root = ./.;
+                fileset = lib.fileset.unions [
+                  ./android
+                  ./rust/Cargo.toml
+                ];
+              };
+              sourceRoot = "source/android";
 
               nativeBuildInputs = [ pkgs.gradle_9 ];
 

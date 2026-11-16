@@ -19,6 +19,17 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.tomlj.Toml
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        // TOML parser (no transitive dependencies) for reading the app version from rust/Cargo.toml.
+        classpath("org.tomlj:tomlj:2.2.0")
+    }
+}
 
 plugins {
     id("com.android.application")
@@ -241,6 +252,18 @@ abstract class ValidateReleaseSigning : DefaultTask() {
 
 val pinnedNdkVersion = "30.0.16248370"
 val rustWorkspace = rootProject.layout.projectDirectory.dir("../rust")
+
+// The app version is the Rust workspace version, so the app and the core crate cannot drift.
+val appVersion = providers.fileContents(rustWorkspace.file("Cargo.toml")).asText.map { manifest ->
+    val parsed = Toml.parse(manifest)
+    require(!parsed.hasErrors()) {
+        "rust/Cargo.toml is not valid TOML: ${parsed.errors().joinToString()}"
+    }
+    requireNotNull(parsed.getString("workspace.package.version")) {
+        "rust/Cargo.toml has no [workspace.package] version"
+    }
+}
+
 val cargoExecutableProvider = providers.gradleProperty("rustCargo").orElse("cargo")
 val releaseKeystorePath = providers.environmentVariable("REMINDERS_RELEASE_KEYSTORE")
 val releaseKeyAlias = providers.environmentVariable("REMINDERS_RELEASE_KEY_ALIAS")
@@ -302,7 +325,7 @@ android {
         minSdk = 37
         targetSdk = 37
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = appVersion.get()
 
         ndk {
             abiFilters += rustAbis.get()
