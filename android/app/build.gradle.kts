@@ -264,6 +264,21 @@ val appVersion = providers.fileContents(rustWorkspace.file("Cargo.toml")).asText
     }
 }
 
+// versionCode = major * 10000 + minor * 100 + patch, so it rises with every semver bump
+// (0.1.0 -> 100, 1.2.3 -> 10203). Pre-release and build suffixes are rejected because
+// they have no place in this scheme.
+val appVersionCode = appVersion.map { version ->
+    val parts = version.split('.')
+    require(parts.size == 3 && parts.all { part -> part.isNotEmpty() && part.length <= 4 && part.all(Char::isDigit) }) {
+        "rust/Cargo.toml version \"$version\" must be plain MAJOR.MINOR.PATCH"
+    }
+    val (major, minor, patch) = parts.map(String::toInt)
+    require(minor < 100 && patch < 100) {
+        "rust/Cargo.toml version \"$version\": minor and patch must be below 100 to derive versionCode"
+    }
+    major * 10_000 + minor * 100 + patch
+}
+
 val cargoExecutableProvider = providers.gradleProperty("rustCargo").orElse("cargo")
 val releaseKeystorePath = providers.environmentVariable("REMINDERS_RELEASE_KEYSTORE")
 val releaseKeyAlias = providers.environmentVariable("REMINDERS_RELEASE_KEY_ALIAS")
@@ -324,7 +339,7 @@ android {
         applicationId = "dev.mendy.reminders"
         minSdk = 37
         targetSdk = 37
-        versionCode = 1
+        versionCode = appVersionCode.get()
         versionName = appVersion.get()
 
         ndk {
