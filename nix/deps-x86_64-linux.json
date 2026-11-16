@@ -926,15 +926,12 @@
    "gz": "sha256-3IRF1v2J+2WOdNM98rOA0BWnXO+ZCINzeJnuK0PbQdI="
   }
  },
- "https://maven.google.com": {
-  "androidx/activity/group-index": {
+ "https://maven.google.com/androidx": {
+  "activity/group-index": {
    "xml": "sha256-AkMgYEHPJ9kkrrhCfyWJDvuqIYieiaX4dcvB/2MHqKE="
   },
-  "androidx/glance/group-index": {
+  "glance/group-index": {
    "xml": "sha256-iQM1G2tXscG1nn65o3ITzflTQiS+qzDfwAi3sgKpjJc="
-  },
-  "master-index": {
-   "xml": "sha256-bSHnsKAmpz5WAp1Ja3cXJLGrqMM4UEqX4MwQeItX0ZE="
   }
  },
  "https://repo.maven.apache.org/maven2": {
@@ -1537,6 +1534,10 @@
   "org/tensorflow#tensorflow-lite-metadata/0.2.0": {
    "jar": "sha256-6fGLikHwF+kDPLDthciiuiMHKSzf4l6uNlkj56MdKnA=",
    "pom": "sha256-D+MTJug7diLLzZx11GeykfAf/jzG4+dmUawFocHHo2A="
+  },
+  "org/tomlj#tomlj/2.2.0": {
+   "jar": "sha256-4fyYc087QoW0+H0fH0czAMg3kfL7QG/rhrymfjcYluc=",
+   "pom": "sha256-dMb+cvTih0OMDTxLmVPuYjyERZ6nGgW/dw5FmIVEL1o="
   }
  }
 }
