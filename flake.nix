@@ -29,6 +29,9 @@
 
       forEachSystem = lib.genAttrs systems;
 
+      # Single source of truth for the version in derivation names: the Rust workspace.
+      appVersion = (lib.importTOML ./rust/Cargo.toml).workspace.package.version;
+
       # Android pins. Keep in sync with android/app/build.gradle.kts.
       androidPlatform = 37;
       androidPlatformVersion = "37.1";
@@ -190,7 +193,7 @@
               commonArgs = {
                 src = rustSrc;
                 pname = "reminder-core-${abi}";
-                version = "0.1.0";
+                version = appVersion;
                 strictDeps = true;
                 doCheck = false;
                 nativeBuildInputs = [ pkgs.cargo-ndk ];
@@ -235,7 +238,7 @@
           uniffiBindgen = craneLib.buildPackage {
             src = rustSrc;
             pname = "uniffi-bindgen";
-            version = "0.1.0";
+            version = appVersion;
             strictDeps = true;
             doCheck = false;
             cargoVendorDir = vendorCopy;
@@ -289,7 +292,7 @@
             in
             pkgs.stdenv.mkDerivation (finalAttrs: {
               pname = "reminders-apk-${buildType}-${lib.concatStringsSep "-" abiNames}";
-              version = "0.1.0";
+              version = appVersion;
               src = ./android;
 
               nativeBuildInputs = [ pkgs.gradle_9 ];
