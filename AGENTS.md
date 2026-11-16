@@ -25,8 +25,7 @@ reminders/
 ├── flake.lock
 ├── nix/             Gradle dependency lockfiles, one per system (deps-<system>.json)
 ├── scripts/         Host-side scripts (release signing)
-├── Justfile
-└── NIX_PLAN.md      Nix build plan, decisions, risks, and status
+└── Justfile
 ```
 
 The Rust core is exposed to Kotlin through UniFFI. There are two ways to build the APK:
@@ -56,7 +55,7 @@ The Gradle-driven debug APK is written to `android/app/build/outputs/apk/debug/`
 
 ## Nix build
 
-macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. `NIX_PLAN.md` has the stages, risks, evidence, and open items. The user runs all builds.
+macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. The user runs all builds.
 
 Common commands, for the user (Fish, repo root; add `--option substituters https://cache.nixos.org/` if the Determinate cache times out):
 
@@ -68,7 +67,7 @@ python3 scripts/sign-release.py result-release/reminders-release-UNSIGNED.zip re
 nix build .#apk-arm64.mitmCache.updateScript -o result-update; ./result-update   # re-record this system's Gradle lockfile
 ```
 
-Flake outputs: `reminder-core-<abi>`, `uniffi-kotlin`, and `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`. Rust is built once per ABI so the variants share cache. Exercised so far: `apk-arm64`, `apk-release-arm64` and `apk-release-universal`; see NIX_PLAN.md.
+Flake outputs: `reminder-core-<abi>`, `uniffi-kotlin`, and `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`. Rust is built once per ABI so the variants share cache. `apk-arm64`, `apk-release-arm64` and `apk-release-universal` have been built; `apk-x86_64`, `apk-universal` and `apk-release-x86_64` evaluate but have not been built. Each Gradle derivation takes about a minute (configuration, AAR transforms, Kotlin, resources and lint each take a large share).
 
 Decisions and invariants:
 
@@ -79,12 +78,14 @@ Decisions and invariants:
 - Every Nix Gradle derivation also passes `--info --stacktrace --no-configuration-cache`, `-PunsignedRelease=true`, and `-Pandroid.aapt2FromMavenOverride` (the SDK's `build-tools/36.0.0/aapt2`). `gradle-daemon-jvm.properties` is removed in `postPatch` so Gradle does not try to download a JDK.
 - Gradle dependencies are served offline from `nix/deps-<system>.json` through `gradle.fetchDeps` (mitm-cache replay, which is why `__darwinAllowLocalNetworking` is set). The lockfiles are generated, never hand-edited, and are recorded with an update task that runs both `assembleDebug` and `assembleRelease`. Re-record on each system after any Gradle dependency change.
 - Debug APKs are signed with the committed `android/app/debug.keystore` (standard debug credentials) so they are reproducible and update in place. Never reuse that key for release signing.
-- Release APKs are built unsigned (`-PunsignedRelease=true`, output `reminders-release-UNSIGNED.zip`) and signed on the host by `scripts/sign-release.py`, which fetches the `.p12` and password from 1Password with `op read`. The release key lives outside the repo and is never given to Nix or to Gradle in the sandbox.
-- The arm64 `.so` and the arm64 debug APK are byte-identical across macOS and Linux (verified; the other variants and the signed release are not compared yet). That depends on the `RUSTC_WRAPPER` in `flake.nix` (rewrites `-C metadata`, remaps vendor and working-directory paths, uses `RUSTC_BOOTSTRAP=1` for `-Zremap-cwd-prefix`), the `.comment` section removal after linking, and the fixed debug keystore. Do not remove or change those without re-comparing hashes on both systems.
+- Release APKs are built unsigned (`-PunsignedRelease=true`, output `reminders-release-UNSIGNED.zip`, deliberately not `.apk`) and signed on the host by `scripts/sign-release.py <unsigned.zip> <signed.apk>`. Run it where `op` is signed in and `apksigner` is on `PATH` or under `$ANDROID_HOME/build-tools` (for example `nix develop`). It fetches the `.p12` and its password with `op read`, keeps the keystore in a private temporary directory that is overwritten and removed on every exit path, passes the password to `apksigner` through its environment, verifies the result, and only then writes the output. The release key lives outside the repo and is never given to Nix or to Gradle in the sandbox.
+- `scripts/sign-release.py` passes every `apksigner sign` option explicitly: `--min-sdk-version 37` (keep in sync with `minSdk`; the `MIN_SDK_VERSION` constant), v1 off, v2 and v3 on, v4 off, verity off, alignment not preserved with 16 KiB library pages, and debuggable APKs refused. Without explicit flags apksigner added v1 files despite `minSdk` 37. The 1Password references are constants at the top of the script; the item title has a space before the slash.
+- The release key is an EC key (P-384, ECDSA with SHA-512). ECDSA signatures are randomized, so two signings of the same input differ, even on one machine. The unsigned zip is the reproducible artifact: compare it, not the signed APK. `--deterministic-dsa-signing` only applies to DSA keys.
+- The arm64 `.so`, the arm64 debug APK, and the universal unsigned release are byte-identical across macOS and Linux (verified). Four causes of earlier differences are fixed: (1) Cargo hashes the build host's `rustc -vV` into `-C metadata` of host units (build scripts, proc-macros) and target crates inherit it (rust-lang/cargo#8140; cargo#14107 only covers target units), fixed by the `RUSTC_WRAPPER` in `flake.nix`, which rewrites `-C metadata` to a hash of host-independent inputs; (2) embedded vendor and working-directory paths (per-system store hashes, `/build/source` vs a random macOS directory) changed the linker's string-merge order and debug info, fixed by the same wrapper (`--remap-path-prefix` for the vendor directory, `-Zremap-cwd-prefix` with `RUSTC_BOOTSTRAP=1` set only for the compiler process); (3) the NDK's LLD writes host-specific paths into `.comment`, removed with `llvm-objcopy --remove-section=.comment` after linking; (4) AGP generated a random debug keystore per build, fixed by the committed `debug.keystore`. crane's `doRemapPathPrefix` does nothing unless `craneLib.remapPathPrefixHook` is also in `nativeBuildInputs`, so it is not used. Do not remove or change any of these without re-comparing hashes on both systems.
 - `uniffi-kotlin` vendors dependencies as real copies (`cp -rL`), because askama 0.16 breaks under crane's symlinked vendor directory.
 - Flakes only see git-tracked files. Remind the user to `git add` new files before running Nix.
 
-Update this section and `NIX_PLAN.md` when outputs, commands, or invariants change.
+Update this section when outputs, commands, or invariants change.
 
 ## Architecture direction
 
