@@ -5,7 +5,7 @@
 - `README.md` is human-owned. Do not add to or edit it unless the user explicitly asks.
 - Never run Cargo commands.
 - Do not run Gradle builds or tool installation commands; give those commands to the user to run.
-- Do not run `nix` commands (`nix build`, `nix develop`, `nix flake lock`, and so on); give them to the user to run.
+- Do not run `nix` commands that build or realize things (`nix build`, `nix develop`, `nix run`, `nix flake lock`, and so on); give them to the user to run. The user has authorized only these quick, non-building checks: `nix eval ...drvPath`, `nix build ... --dry-run`, `nix flake check --no-build`, and running `nixfmt`, `deadnix` and `statix` on `flake.nix` through `nix shell --inputs-from . nixpkgs#...`.
 - Ask before running any command that changes files, dependencies, installed tools, or other state unless the user has explicitly authorized that specific change.
 - The user uses Fish shell. Commands intended for the user must use Fish syntax.
 - Use `apply_patch` for authorized file edits.
@@ -19,19 +19,26 @@ Reminders is a personal Android reminder app for one user. It will be installed 
 
 ```text
 reminders/
-├── rust/       Cargo workspace and native core library
-└── android/    Android Studio project (Kotlin, Compose, and Glance)
+├── rust/            Cargo workspace and native core library
+├── android/         Android Studio project (Kotlin, Compose, and Glance)
+├── flake.nix        Nix build: toolchains, Rust, UniFFI bindings, APKs, dev shell
+├── flake.lock
+├── nix/             Gradle dependency lockfiles, one per system (deps-<system>.json)
+├── scripts/         Host-side scripts (release signing)
+├── Justfile
+└── NIX_PLAN.md      Nix build plan, decisions, risks, and status
 ```
 
-The Rust core is exposed to Kotlin through UniFFI. Gradle owns the Android pipeline:
+The Rust core is exposed to Kotlin through UniFFI. There are two ways to build the APK:
 
 ```text
-Gradle -> cargo-ndk -> libreminder_core.so -> UniFFI bindgen -> Kotlin -> Compose
+Gradle-driven (default):  Gradle -> cargo-ndk -> libreminder_core.so -> UniFFI bindgen -> Kotlin -> Compose
+Nix (see below):          reminder-core-<abi> (.so) + uniffi-kotlin  ->  offline Gradle  ->  APK
 ```
 
 `rust/` is a workspace with two crates: `core` (`reminder-core`, the library exposed through UniFFI) and `uniffi-bindgen` (a small binary crate that depends on `uniffi` with the `cli` feature). Keep `uniffi/cli` out of `core` so the Android library does not compile the bindgen toolchain. Both crates share the UniFFI version through `[workspace.dependencies]`.
 
-The initial `ping()` milestone has passed end to end. `./gradlew :app:assembleDebug` completed successfully, including Rust compilation, UniFFI binding generation, Kotlin compilation, and APK assembly. UniFFI emitted a harmless warning because ktlint is not installed; optional generated-code formatting may be configured later.
+The initial `ping()` milestone has passed end to end through both build paths, including Rust compilation, UniFFI binding generation, Kotlin compilation, and APK assembly.
 
 ## Current toolchain
 
@@ -43,27 +50,41 @@ The initial `ping()` milestone has passed end to end. `./gradlew :app:assembleDe
 - UniFFI 0.32.2
 - rusqlite 0.42.0 with bundled SQLite
 
-The app builds `arm64-v8a` and `x86_64` by default. A phone-only build can use `-PrustAbis=arm64-v8a`.
+The Gradle-driven build defaults to `arm64-v8a` and `x86_64`. A phone-only build can use `-PrustAbis=arm64-v8a`. It needs a JDK and the Android SDK/NDK; on the Mac these come from `nix develop` (the machine has no JDK or SDK of its own, and the dev shell includes ktlint so UniFFI formats the generated Kotlin).
 
-The debug APK is written to `android/app/build/outputs/apk/debug/`.
+The Gradle-driven debug APK is written to `android/app/build/outputs/apk/debug/`.
 
-## Nix build (planned, not implemented yet)
+## Nix build
 
-The goal is to build the APK with Nix so that macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. Decisions made so far:
+macOS (`aarch64-darwin`) and Linux (`x86_64-linux`) machines need only Nix installed. `NIX_PLAN.md` has the stages, risks, evidence, and open items. The user runs all builds.
 
-- nixpkgs unstable, with `rust-overlay` and `crane`. Only `aarch64-darwin` and `x86_64-linux` are supported.
-- The Android SDK and NDK come from `androidenv.composeAndroidPackages`: platform 37.1 and NDK 30.0.16248370 as listed under Current toolchain, plus build-tools 36.0.0 (AGP 9.5's default and minimum). The Rust derivations use a separate NDK-only composition so SDK changes do not rebuild the Rust crates.
+Common commands, for the user (Fish, repo root; add `--option substituters https://cache.nixos.org/` if the Determinate cache times out):
+
+```fish
+nix develop                                              # JDK 25, Android SDK/NDK, Rust, cargo-ndk, just, ktlint, nixfmt, deadnix, statix, nom
+nix build .#apk-arm64                                    # debug APK: result/reminders-debug.apk
+nix build .#apk-release-arm64 -o result-release          # unsigned release: result-release/reminders-release-UNSIGNED.zip
+python3 scripts/sign-release.py result-release/reminders-release-UNSIGNED.zip reminders-release.apk   # run where `op` and `apksigner` exist, e.g. in nix develop
+nix build .#apk-arm64.mitmCache.updateScript -o result-update; ./result-update   # re-record this system's Gradle lockfile
+```
+
+Flake outputs: `reminder-core-<abi>`, `uniffi-kotlin`, and `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`. Rust is built once per ABI so the variants share cache. Exercised so far: `apk-arm64`, `apk-release-arm64` and `apk-release-universal`; see NIX_PLAN.md.
+
+Decisions and invariants:
+
+- nixpkgs unstable with `rust-overlay` and `crane`. Only `aarch64-darwin` and `x86_64-linux` are supported.
+- SDK and NDK come from `androidenv.composeAndroidPackages`: platform 37.1, NDK 30.0.16248370, and build-tools 36.0.0 (AGP 9.5's default and minimum). The Rust derivations use a separate NDK-only composition so SDK changes do not rebuild the Rust crates.
 - Use `pkgs.gradle_9` (9.8.2 at the locked nixpkgs revision; AGP 9.5 needs 9.6.0 or later) with `jdk25`. The default `pkgs.gradle` is Gradle 8 and must not be used.
-- The pure build is a derivation chain: per-ABI `reminder-core` `.so` files, then UniFFI Kotlin bindings, then an offline Gradle APK build with dependencies locked by `gradle.fetchDeps` (`deps.json`, likely per system).
-- Inside the Nix build, Gradle receives the prebuilt `.so` files and bindings through `-PprebuiltJniLibs=<dir containing <abi>/libreminder_core.so>` and `-PprebuiltUniffiKotlin=<dir of generated Kotlin>` (both required together) instead of running `cargo ndk` and `uniffi-bindgen` itself. The existing Gradle-driven flow stays the default when neither property is set. `-PrustAbis` must still list exactly the ABIs present in `prebuiltJniLibs`.
-- The Gradle dependency lockfiles are `nix/deps-<system>.json`. They are generated, not hand-edited: run the script from `nix build .#apk-arm64.mitmCache.updateScript` from the repository root after any Gradle dependency change, on each supported system.
+- Inside the Nix build, Gradle receives the prebuilt `.so` files and bindings through `-PprebuiltJniLibs=<dir containing <abi>/libreminder_core.so>` and `-PprebuiltUniffiKotlin=<dir of generated Kotlin>` (both required together) instead of running `cargo ndk` and `uniffi-bindgen` itself. The Gradle-driven flow stays the default when neither is set. `-PrustAbis` must list exactly the ABIs present in `prebuiltJniLibs`.
+- Every Nix Gradle derivation also passes `--info --stacktrace --no-configuration-cache`, `-PunsignedRelease=true`, and `-Pandroid.aapt2FromMavenOverride` (the SDK's `build-tools/36.0.0/aapt2`). `gradle-daemon-jvm.properties` is removed in `postPatch` so Gradle does not try to download a JDK.
+- Gradle dependencies are served offline from `nix/deps-<system>.json` through `gradle.fetchDeps` (mitm-cache replay, which is why `__darwinAllowLocalNetworking` is set). The lockfiles are generated, never hand-edited, and are recorded with an update task that runs both `assembleDebug` and `assembleRelease`. Re-record on each system after any Gradle dependency change.
 - Debug APKs are signed with the committed `android/app/debug.keystore` (standard debug credentials) so they are reproducible and update in place. Never reuse that key for release signing.
-- `android/gradle/gradle-daemon-jvm.properties` is removed inside the Nix build so Gradle does not try to download a JDK.
-- ABIs are one parameter shared by the Rust derivations, toolchain targets, and `-PrustAbis`. Flake outputs: `reminder-core-<abi>`, `uniffi-kotlin`, and `apk-<variant>` (debug) and `apk-release-<variant>` (unsigned release) for `arm64`, `x86_64`, and `universal`. One Rust derivation per ABI so they share cache.
-- Release APKs are built unsigned by Nix (`-PunsignedRelease=true`, output `reminders-release-UNSIGNED.zip`) and signed on the host with `scripts/sign-release.py <unsigned.zip> <signed.apk>`, which reads the key and password from 1Password with `op read`. The release key lives outside the repo and is never given to Nix or to Gradle in the sandbox.
+- Release APKs are built unsigned (`-PunsignedRelease=true`, output `reminders-release-UNSIGNED.zip`) and signed on the host by `scripts/sign-release.py`, which fetches the `.p12` and password from 1Password with `op read`. The release key lives outside the repo and is never given to Nix or to Gradle in the sandbox.
+- The arm64 `.so` and the arm64 debug APK are byte-identical across macOS and Linux (verified; the other variants and the signed release are not compared yet). That depends on the `RUSTC_WRAPPER` in `flake.nix` (rewrites `-C metadata`, remaps vendor and working-directory paths, uses `RUSTC_BOOTSTRAP=1` for `-Zremap-cwd-prefix`), the `.comment` section removal after linking, and the fixed debug keystore. Do not remove or change those without re-comparing hashes on both systems.
+- `uniffi-kotlin` vendors dependencies as real copies (`cp -rL`), because askama 0.16 breaks under crane's symlinked vendor directory.
 - Flakes only see git-tracked files. Remind the user to `git add` new files before running Nix.
 
-Update this section as stages land, and replace "planned" with the actual outputs and commands.
+Update this section and `NIX_PLAN.md` when outputs, commands, or invariants change.
 
 ## Architecture direction
 

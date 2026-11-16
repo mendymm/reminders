@@ -32,6 +32,11 @@ KEYSTORE_REFERENCE = "op://Personal/reminders app android release keystore /remi
 PASSWORD_REFERENCE = "op://Personal/reminders app android release keystore /p12 enc password"
 DEFAULT_ALIAS = "reminders-release"
 PASSWORD_ENV_VAR = "REMINDERS_KEYSTORE_PASSWORD"
+# Keep in sync with minSdk in android/app/build.gradle.kts. It is passed to apksigner
+# explicitly instead of letting it read the manifest.
+MIN_SDK_VERSION = "37"
+# apksigner aligns native libraries to this many bytes (16 KiB pages).
+LIB_PAGE_ALIGNMENT = "16384"
 
 
 class SigningError(Exception):
@@ -130,12 +135,25 @@ def sign(unsigned: Path, destination: Path, alias: str) -> None:
             [
                 apksigner,
                 "sign",
+                "--verbose",
+                # Signing key.
                 "--ks", str(keystore),
                 "--ks-type", "PKCS12",
                 "--ks-key-alias", alias,
                 "--ks-pass", f"env:{PASSWORD_ENV_VAR}",
                 "--key-pass", f"env:{PASSWORD_ENV_VAR}",
+                # Signature schemes: minSdk 37 needs neither v1 (JAR) nor v4 (incremental install).
+                "--min-sdk-version", MIN_SDK_VERSION,
+                "--v1-signing-enabled", "false",
+                "--v2-signing-enabled", "true",
+                "--v3-signing-enabled", "true",
                 "--v4-signing-enabled", "false",
+                "--verity-enabled", "false",
+                # Alignment: always (re)align, with 16 KiB native-library pages.
+                "--alignment-preserved", "false",
+                "--lib-page-alignment", LIB_PAGE_ALIGNMENT,
+                # Never sign a debuggable APK with the production key.
+                "--debuggable-apk-permitted", "false",
                 "--out", str(signed_tmp),
                 str(unsigned),
             ],
@@ -148,7 +166,14 @@ def sign(unsigned: Path, destination: Path, alias: str) -> None:
 
         print("Verifying the signature...", file=sys.stderr)
         verified = subprocess.run(
-            [apksigner, "verify", "--verbose", "--print-certs", str(signed_tmp)],
+            [
+                apksigner,
+                "verify",
+                "--verbose",
+                "--print-certs",
+                "--min-sdk-version", MIN_SDK_VERSION,
+                str(signed_tmp),
+            ],
             check=False,
         )
         if verified.returncode != 0:

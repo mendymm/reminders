@@ -318,6 +318,9 @@
               '';
 
               gradleFlags = [
+                # Verbose output, since sandbox failures are otherwise hard to diagnose.
+                "--info"
+                "--stacktrace"
                 "--no-configuration-cache"
                 "-PprebuiltJniLibs=${jniLibs}"
                 "-PprebuiltUniffiKotlin=${uniffiKotlin}"
