@@ -393,6 +393,13 @@ android {
         compose = true
     }
 
+    lint {
+        // The release lint check downloads Google's Play SDK Index, a file that changes
+        // in place. A build that has to be reproducible cannot depend on it, and the
+        // check does not change the APK.
+        checkReleaseBuilds = false
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
