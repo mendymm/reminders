@@ -9,6 +9,8 @@ name = "reminder_core"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+jiff = "1.0.0"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 uniffi = { workspace = true }
+uuid = "1.29.2"
 
