@@ -1,13 +1,16 @@
 //! Pure transitions on [`Progress`]. No I/O and no clock: callers pass `now`.
 //!
 //! Resolutions are archival, so none of these take an [`crate::model::Outcome`].
-//! Done and skipped advance progress identically.
+//! Done and skipped advance progress identically. `resolve` records which
+//! resolution produced the new state, so that exactly that one can be undone.
 
 use std::fmt;
 
 use jiff::Timestamp;
 
-use crate::model::{Plan, Progress, ProgressState, ReminderId, Recurrence, Slot, Watermark};
+use crate::model::{
+    Plan, Progress, ProgressState, Recurrence, ReminderId, ResolutionId, Slot, Watermark,
+};
 use crate::recurrence::next_slot;
 
 #[cfg(test)]
@@ -59,6 +62,7 @@ impl Progress {
         Some(Self {
             reminder_id,
             state,
+            last_resolution: None,
             revision: 1,
             updated_at: now,
         })
@@ -71,6 +75,7 @@ impl Progress {
         &self,
         plan: &Plan,
         slot: Option<Slot>,
+        resolution: ResolutionId,
         now: Timestamp,
     ) -> Result<Self, TransitionError> {
         let state = match (&self.state, plan) {
@@ -96,7 +101,7 @@ impl Progress {
             }
             _ => return Err(TransitionError::WrongPlan),
         };
-        Ok(self.with_state(state, now))
+        Ok(self.with_state(state, Some(resolution), now))
     }
 
     /// Undoes the last resolution. For a cadence this is one level deep.
@@ -115,7 +120,7 @@ impl Progress {
                 return Err(TransitionError::NothingToUndo);
             }
         };
-        Ok(self.with_state(state, now))
+        Ok(self.with_state(state, None, now))
     }
 
     /// The slot waiting to be resolved: a one-off reminder's due time while it is
@@ -135,10 +140,16 @@ impl Progress {
         }
     }
 
-    fn with_state(&self, state: ProgressState, now: Timestamp) -> Self {
+    fn with_state(
+        &self,
+        state: ProgressState,
+        last_resolution: Option<ResolutionId>,
+        now: Timestamp,
+    ) -> Self {
         Self {
             reminder_id: self.reminder_id,
             state,
+            last_resolution,
             revision: self.revision.saturating_add(1),
             updated_at: now,
         }

@@ -16,6 +16,7 @@ pub enum InvalidValue {
     NoClockTimes,
     NonPositiveDuration,
     WindowReversed,
+    BlankTitle,
 }
 
 impl fmt::Display for InvalidValue {
@@ -28,6 +29,7 @@ impl fmt::Display for InvalidValue {
             Self::NoClockTimes => write!(f, "at least one clock time is required"),
             Self::NonPositiveDuration => write!(f, "duration must be positive"),
             Self::WindowReversed => write!(f, "window must not start after it ends"),
+            Self::BlankTitle => write!(f, "title must not be blank"),
         }
     }
 }
@@ -155,5 +157,24 @@ impl Window {
 
     pub fn end(self) -> civil::Time {
         self.end
+    }
+}
+
+/// A reminder title: not blank, with surrounding whitespace trimmed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Title(String);
+
+impl Title {
+    pub fn new(text: impl AsRef<str>) -> Result<Self, InvalidValue> {
+        let trimmed = text.as_ref().trim();
+        if trimmed.is_empty() {
+            Err(InvalidValue::BlankTitle)
+        } else {
+            Ok(Self(trimmed.to_owned()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }

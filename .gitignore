@@ -6,6 +6,7 @@ rust/target/
 android/.gradle/
 android/build/
 android/app/build/
+android/.kotlin
 
 result
 
@@ -17,3 +18,4 @@ fdroid/fingerprint.txt
 fdroid/keystore.p12
 fdroidserver-tool
 site/
+

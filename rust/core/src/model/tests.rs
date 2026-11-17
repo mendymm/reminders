@@ -4,8 +4,8 @@ use jiff::{SignedDuration, Timestamp, civil};
 use proptest::prelude::*;
 
 use super::{
-    ClockTimes, DayOfMonth, InvalidValue, PositiveDuration, ReminderId, ResolutionId, Weekdays,
-    Window,
+    ClockTimes, DayOfMonth, InvalidValue, PositiveDuration, ReminderId, ResolutionId, Title,
+    Weekdays, Window,
 };
 
 /// Any time of day, to nanosecond precision, so that sub-second differences are
@@ -185,4 +185,20 @@ fn an_instant_before_the_epoch_is_stamped_as_the_epoch() {
     let id = ReminderId::new(before).0;
     assert_eq!(id.get_version_num(), 7);
     assert_eq!(id.get_timestamp().expect("a v7 id has a timestamp").to_unix(), (0, 0));
+}
+
+proptest! {
+    #[test]
+    fn title_is_trimmed_and_never_blank(text in "[ \t\na-z]{0,12}") {
+        match Title::new(&text) {
+            Ok(title) => {
+                prop_assert!(!text.trim().is_empty());
+                prop_assert_eq!(title.as_str(), text.trim());
+            }
+            Err(error) => {
+                prop_assert!(text.trim().is_empty());
+                prop_assert_eq!(error, InvalidValue::BlankTitle);
+            }
+        }
+    }
 }
