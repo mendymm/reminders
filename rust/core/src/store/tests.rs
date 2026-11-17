@@ -449,7 +449,7 @@ fn any_alert() -> impl Strategy<Value = Alert> {
     (style, nudge).prop_map(|(style, nudge)| Alert { style, nudge })
 }
 
-fn any_plan() -> impl Strategy<Value = Plan> {
+pub(crate) fn any_plan() -> impl Strategy<Value = Plan> {
     prop_oneof![
         Just(Plan::Once { due: None }),
         (any_datetime(), any_zone(), any_alert()).prop_map(|(local, zone, alert)| Plan::Once {
@@ -465,7 +465,7 @@ fn any_plan() -> impl Strategy<Value = Plan> {
     ]
 }
 
-fn any_slot() -> impl Strategy<Value = Slot> {
+pub(crate) fn any_slot() -> impl Strategy<Value = Slot> {
     any_datetime().prop_map(Slot)
 }
 

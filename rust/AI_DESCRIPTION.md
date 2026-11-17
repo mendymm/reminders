@@ -4,7 +4,7 @@
 
 ## What it is
 
-`rust/core` is the `reminder-core` crate: the domain model and logic for a personal reminder app, built to be exposed to Kotlin through UniFFI. Today only `ping()` is exported. Nothing else is wired to UniFFI or to Android yet. A SQLite storage exists, but nothing opens a database in the app.
+`rust/core` is the `reminder-core` crate: the domain model and logic for a personal reminder app, exposed to Kotlin through UniFFI. `ping()` and a `ReminderStore` object are exported. No Kotlin code calls the store yet, and nothing opens a database in the app.
 
 The core never reads the clock or the device time zone. Callers pass `now` and the device zone in.
 
@@ -19,6 +19,7 @@ The core never reads the clock or the device time zone. Callers pass `now` and t
 | `instant` | `instant_of`: turns a local time slot into an instant. |
 | `commands` | The command layer: the `Reminders` trait, `LocalReminders` and the `Storage` port. |
 | `store` | `SqliteStorage`: the SQLite implementation of the `Storage` port. |
+| `ffi` | What Kotlin sees: mirror types, `ReminderError` and the `ReminderStore` object. |
 
 Each module keeps its tests in a `tests.rs` beside it.
 
@@ -154,9 +155,23 @@ A plan is rejected if a `Fixed` zone name is unknown to the time zone database o
 - **Commits** run in one immediate transaction. Every expectation is checked before anything is written, so a refused write set changes nothing. Errors match `MemoryStorage`'s.
 - **Corrupt data.** A row that cannot be turned back into a valid model value is reported as `StorageError::Corrupt`.
 
+## The FFI layer (`ffi`)
+
+`ReminderStore` is the one exported object. It owns a `LocalReminders<SqliteStorage>` behind a mutex, so calls are serialized. Calls block, so Kotlin makes them off the UI thread.
+
+- **Constructors:** `open(path)` and `open_in_memory()`.
+- **Methods:** `create`, `edit`, `delete`, `resolve`, `undo`, `get`, `list`, `upcoming` and `history`, with the same meaning as the commands they wrap.
+- **IDs:** `new_reminder_id(now_ms)` and `new_resolution_id(now_ms)` return UUIDv7 text, so Kotlin never invents ids.
+- **Context:** commands that need the time take a `CallContext { now_ms, device_zone }` on every call. `device_zone` is an IANA zone name. An unknown one is `InvalidInput`. (The model's `Context` is renamed because Android has its own.)
+- **Mirror types** (`ffi/types.rs`) copy the model one to one using only what UniFFI carries. Instants are Unix milliseconds, ids are UUID text, local dates and times are ISO 8601 text, durations are `std::time::Duration`, and weekdays are an enum. `Due.when` is `Due.at` because `when` is a Kotlin keyword.
+- **Input** is turned into model values through the model's constructors. Anything the model would refuse comes back as `ReminderError::InvalidInput` with the reason.
+- **`ReminderError`** is a flat enum with a case for each command failure (`NotFound`, `Conflict { current }`, `AlreadyHandled`, `UnknownZone { name }` and so on), plus `InvalidInput` and `Storage`. Kotlin gets one exception type with a subclass per case.
+
 ## Tests
 
 `proptest` property tests plus pinned examples. The recurrence tests compare `next_slot` with a brute-force day-by-day enumeration written a different way. The DST tests use a POSIX rule string for US Eastern time; two tests look up `America/New_York` in the machine's time zone database. The command tests run against `MemoryStorage`, and one property test runs random command sequences and checks that progress still matches each plan, revisions never decrease, and `upcoming` stays sorted and excludes archived and completed reminders. The store tests run the same storage-rule checks against both storages, check the schema's constraints and corrupt-data handling, reopen a database file, and run random command sequences on `MemoryStorage` and `SqliteStorage` side by side, comparing every result and state. Serde tests check that the validated types refuse JSON they would not build from and that values survive a round trip.
+
+The FFI tests check that plans and outcomes survive a round trip through the mirror types, that input the model would refuse is refused, the `CommandError` to `ReminderError` mapping case by case, and a reminder's whole life through the exported store using its Rust API.
 
 ## Dependencies
 

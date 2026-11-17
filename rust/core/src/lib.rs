@@ -1,6 +1,7 @@
 uniffi::setup_scaffolding!();
 
 pub mod commands;
+pub mod ffi;
 pub mod instant;
 pub mod model;
 pub mod progress;
