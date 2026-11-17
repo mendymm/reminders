@@ -20,7 +20,7 @@ use jiff::{SignedDuration, civil};
 use crate::model::{End, MonthlyOn, Nth, Recurrence, Rule, Slot, TimesOfDay, Watermark};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The first slot strictly after the watermark, or `None` once the recurrence
 /// has ended or the calendar runs out.

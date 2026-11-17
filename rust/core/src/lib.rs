@@ -5,6 +5,7 @@ pub mod instant;
 pub mod model;
 pub mod progress;
 pub mod recurrence;
+pub mod store;
 
 /// Proves that Kotlin can call through UniFFI into the Android Rust library.
 #[uniffi::export]

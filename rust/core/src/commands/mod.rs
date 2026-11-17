@@ -11,12 +11,12 @@
 
 mod local;
 #[cfg(test)]
-mod memory;
+pub(crate) mod memory;
 mod storage;
 mod validate;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::fmt;
 
@@ -24,7 +24,9 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 pub use local::LocalReminders;
-pub use storage::{Expect, ProgressWrite, ResolutionWrite, Storage, StorageError, WriteSet};
+pub use storage::{
+    Expect, ProgressWrite, ResolutionWrite, Storage, StorageError, WriteSet, check_expect,
+};
 
 use crate::instant::ZoneError;
 use crate::model::{

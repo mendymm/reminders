@@ -4,7 +4,7 @@
 
 ## What it is
 
-`rust/core` is the `reminder-core` crate: the domain model and logic for a personal reminder app, built to be exposed to Kotlin through UniFFI. Today only `ping()` is exported. Nothing else is wired to UniFFI, to SQLite or to Android yet.
+`rust/core` is the `reminder-core` crate: the domain model and logic for a personal reminder app, built to be exposed to Kotlin through UniFFI. Today only `ping()` is exported. Nothing else is wired to UniFFI or to Android yet. A SQLite storage exists, but nothing opens a database in the app.
 
 The core never reads the clock or the device time zone. Callers pass `now` and the device zone in.
 
@@ -17,6 +17,8 @@ The core never reads the clock or the device time zone. Callers pass `now` and t
 | `recurrence` | `next_slot`: the next occurrence of a recurrence. |
 | `progress` | Pure state transitions on `Progress`. |
 | `instant` | `instant_of`: turns a local time slot into an instant. |
+| `commands` | The command layer: the `Reminders` trait, `LocalReminders` and the `Storage` port. |
+| `store` | `SqliteStorage`: the SQLite implementation of the `Storage` port. |
 
 Each module keeps its tests in a `tests.rs` beside it.
 
@@ -30,7 +32,7 @@ Three kinds of data:
 
 ### Reminder
 
-A `Reminder` has an id, title, notes, a `Plan`, an optional `archived_at` and a `Meta` (revision, created, updated, deleted tombstone).
+A `Reminder` has an id, a `Title`, notes, a `Plan`, an optional `archived_at` and a `Meta` (revision, created, updated, deleted tombstone).
 
 A `Plan` is one of:
 
@@ -39,7 +41,7 @@ A `Plan` is one of:
 
 Only a scheduled plan carries an `Alert`. An alert has a style, `Notification { sticky }` or `Alarm`, and an optional `Nudge` that re-alerts at an interval, with an optional limit.
 
-A `Zone` is `Floating` (follows the device) or `Fixed(name)` (an IANA name, not validated until it is resolved).
+A `Zone` is `Floating` (follows the device) or `Fixed(name)` (an IANA name, checked when a plan is created or edited and again when it is resolved).
 
 ### Recurrence
 
@@ -53,9 +55,9 @@ A `Slot` is a nominal local date and time. It is how an occurrence is identified
 
 ### Progress
 
-`Progress` has the reminder id, a `ProgressState`, a revision and an update time. The state is `Once { done_at }` or `Cadence { current, previous }`. A tracker has none.
+`Progress` has the reminder id, a `ProgressState`, `last_resolution`, a revision and an update time. The state is `Once { done_at }` or `Cadence { current, previous }`. A tracker has none.
 
-A `Watermark` is how far a cadence has been handled: `through` (the last handled slot) and `handled` (the number of slots up to it, used for `End::Count`). Slots up to the watermark are handled, whether done, skipped or missed. `previous` holds the watermark before the last resolution, for a one-level undo.
+A `Watermark` is how far a cadence has been handled: `through` (the last handled slot) and `handled` (the number of slots up to it, used for `End::Count`). Slots up to the watermark are handled, whether done, skipped or missed. `previous` holds the watermark before the last resolution, for a one-level undo. `last_resolution` is the id of the resolution that produced the current state, so exactly that one can be undone. It is cleared by an undo.
 
 ### Identifiers
 
@@ -63,7 +65,7 @@ A `Watermark` is how far a cadence has been handled: `through` (the last handled
 
 ### Validated values (`model/values.rs`)
 
-Private fields, built through `new`, which returns `InvalidValue` on bad input: `Weekdays` (non-empty set), `DayOfMonth` (1 to 31), `PositiveDuration`, `ClockTimes` (non-empty, sorted, no duplicates), `Window` (start not after end). Counts that cannot be zero use `NonZeroU32`.
+Private fields, built through `new`, which returns `InvalidValue` on bad input: `Weekdays` (non-empty set), `DayOfMonth` (1 to 31), `PositiveDuration`, `ClockTimes` (non-empty, sorted, no duplicates), `Window` (start not after end) and `Title` (not blank, trimmed). Counts that cannot be zero use `NonZeroU32`.
 
 ## Logic
 
@@ -81,11 +83,11 @@ The first slot strictly after the watermark, or `None` when the recurrence has e
 All are pure and take `now`:
 
 - `Progress::initial(id, plan, now)`: `None` for a tracker.
-- `resolve(plan, slot, now)`: completes a one-off. For a cadence, moves the watermark to a later slot and counts the slots it passes over. Errors: `WrongPlan`, `AlreadyDone`, `NotASlot`, `AlreadyHandled`.
+- `resolve(plan, slot, resolution, now)`: completes a one-off. For a cadence, moves the watermark to a later slot and counts the slots it passes over. Errors: `WrongPlan`, `AlreadyDone`, `NotASlot`, `AlreadyHandled`.
 - `undo(now)`: one level deep. Error: `NothingToUndo`.
 - `next_pending(plan)`: a one-off's due time while open, or the next slot after a cadence's watermark.
 
-Each transition increments the revision. `resolve` does not take an `Outcome`, because done and skipped advance progress the same way. It does not reject slots in the future, since it has no local "now".
+Each transition increments the revision. `resolve` does not take an `Outcome`, because done and skipped advance progress the same way. It does not check whether the slot is in the future. The command layer does.
 
 ### `instant::instant_of(slot, zone, device) -> Result<Timestamp, ZoneError>`
 
@@ -95,10 +97,67 @@ Each transition increments the revision. `resolve` does not take an `Outcome`, b
 - A local time that never happens (clocks go forward) uses the offset from before the gap, so 02:30 in a 02:00 to 03:00 gap fires at 03:30.
 - Resolving slots in order does not always give instants in order, and two slots can resolve to the same instant.
 
+## The command layer (`commands`)
+
+The API that the FFI, and later a network client, are meant to wrap.
+
+```
+Reminders (trait)
+  └─ LocalReminders<S: Storage>   validation and orchestration over a Storage
+       └─ Storage (trait)         persistence port: SqliteStorage, plus an in-memory one for tests
+```
+
+Every command takes a `Context { now, device_zone }`. Identifiers come from the caller. A reused id fails with `CommandError::AlreadyExists`.
+
+### Commands
+
+| Command | Behaviour |
+|---|---|
+| `create(ctx, id, draft)` | Builds the reminder at revision 1 and its initial `Progress`. Validates the plan. |
+| `edit(ctx, id, base_revision, edit)` | Applies title, notes, plan and archive changes if the revision matches, else `Conflict { current }`. Replacing a plan keeps `Progress` when the plan stays the same kind (one-off, cadence, tracker) and resets it, with a higher revision, when the kind changes. An archived reminder accepts only `archived: Some(false)`. |
+| `delete(ctx, id, base_revision)` | Tombstones the reminder and drops its progress. Its resolutions stay. |
+| `resolve(ctx, id, resolution_id, outcome, note)` | See the table below. |
+| `undo(ctx, id, resolution_id)` | The resolution that is `Progress::last_resolution` rolls progress back and is retracted. A resolution that moved nothing (no slot) is just retracted. Any other is `NotLatest`. |
+| `get`, `list` | A reminder with its progress. `list` is oldest first and leaves out deleted ones. |
+| `upcoming(ctx, limit)` | Each unarchived, undeleted reminder's pending slot, resolved to an instant and sorted by instant. Overdue slots are included. Reminders whose zone cannot be resolved, or that lack a progress row, are returned in `unresolved`. |
+| `history(id)` | A reminder's resolutions, newest first, without retracted ones. |
+
+`resolve` by plan:
+
+| Plan | Outcome | Effect |
+|---|---|---|
+| one-off | `Done` with no slot | completes it |
+| cadence | `Done` or `Skipped` with a slot | moves the watermark |
+| cadence | `Done` with no slot | log only |
+| tracker | `Done` with no slot | log only |
+
+Anything else is `Invalid(OutcomeNotAllowed)`. A slot may be resolved if it is the next pending slot, even before it fires, or if it has already fired. Otherwise it is `NotResolvable`.
+
+### Validation
+
+A plan is rejected if a `Fixed` zone name is unknown to the time zone database or an `Until` is earlier than `starts_on`. Archived reminders cannot be resolved or undone.
+
+### Storage port
+
+`Storage` reads reminders, progress and resolutions, and takes writes as one `WriteSet` (an optional reminder, progress and resolution write) that must apply atomically. Each reminder or progress put carries an `Expect`: no row, or a row at a given revision. A resolution is inserted (its id must be new) or updated (it must exist). Errors: `AlreadyExists`, `Missing`, `StaleRevision`, `Corrupt`, `Backend`.
+
+`LocalReminders` is the only caller. `MemoryStorage` implements the port for tests and is compiled only under `cfg(test)`. Both storages share `check_expect`, the rule for comparing a row's revision with what a write expects.
+
+## The SQLite store (`store`)
+
+`SqliteStorage::open(path)` or `open_in_memory()` opens a database through rusqlite on plain SQL, with WAL, foreign keys on and `synchronous = NORMAL`. Opening applies any missing migrations. A database from a newer app is refused.
+
+- **Migrations** are Rust strings in `store/migrations.rs`, applied in order and tracked in `PRAGMA user_version`. They are strings, not `.sql` files, so builds that copy only Rust sources still see them.
+- **Tables.** `reminders`, `progress` and `resolutions`, all `STRICT`. Ids are 16-byte blobs. Timestamps are Unix milliseconds, so anything finer is dropped. Local dates and times are ISO 8601 text.
+- **The plan** is one JSON text column on `reminders`, written and read through serde. Serde is derived on the plan types. The validated types deserialize through their `new` constructors, so stored data that breaks a model rule fails to load.
+- **Progress** has a `kind` of `once` or `cadence` and typed columns for the watermark and its previous value. **Resolutions** have an outcome of `done` or `skipped` and an optional slot. CHECK constraints tie the columns to the kind or outcome, and foreign keys tie progress and resolutions to their reminder.
+- **Commits** run in one immediate transaction. Every expectation is checked before anything is written, so a refused write set changes nothing. Errors match `MemoryStorage`'s.
+- **Corrupt data.** A row that cannot be turned back into a valid model value is reported as `StorageError::Corrupt`.
+
 ## Tests
 
-`proptest` property tests plus pinned examples. The recurrence tests compare `next_slot` with a brute-force day-by-day enumeration written a different way. The DST tests use a POSIX rule string for US Eastern time; one test looks up `America/New_York` in the machine's time zone database.
+`proptest` property tests plus pinned examples. The recurrence tests compare `next_slot` with a brute-force day-by-day enumeration written a different way. The DST tests use a POSIX rule string for US Eastern time; two tests look up `America/New_York` in the machine's time zone database. The command tests run against `MemoryStorage`, and one property test runs random command sequences and checks that progress still matches each plan, revisions never decrease, and `upcoming` stays sorted and excludes archived and completed reminders. The store tests run the same storage-rule checks against both storages, check the schema's constraints and corrupt-data handling, reopen a database file, and run random command sequences on `MemoryStorage` and `SqliteStorage` side by side, comparing every result and state. Serde tests check that the validated types refuse JSON they would not build from and that values survive a round trip.
 
 ## Dependencies
 
-`jiff` 1.x (dates, times, zones), `uuid` (v7), `rusqlite` (bundled, unused so far), `uniffi`. `proptest` for tests.
+`jiff` 1.x (dates, times, zones, with its `serde` feature), `uuid` (v7), `rusqlite` (bundled SQLite), `serde` and `serde_json` (the plan column), `uniffi`. `proptest` for tests.

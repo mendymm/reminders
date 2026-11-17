@@ -23,6 +23,7 @@ mod tests;
 use std::num::NonZeroU32;
 
 use jiff::{Timestamp, civil};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use values::{
@@ -91,7 +92,7 @@ pub struct Meta {
 ///
 /// Only a scheduled plan carries an [`Alert`]. An unscheduled plan never fires,
 /// so it has nothing to alert about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Plan {
     /// Finished when its [`Progress`] records a completion.
     Once { due: Option<Due> },
@@ -100,14 +101,14 @@ pub enum Plan {
 }
 
 /// A single point in time to alert at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Due {
     pub when: When,
     pub alert: Alert,
 }
 
 /// A repeating schedule to alert on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cadence {
     pub recurrence: Recurrence,
     pub alert: Alert,
@@ -115,13 +116,13 @@ pub struct Cadence {
 
 /// A wall-clock time in a zone. The instant it denotes is derived, because
 /// zone rules and the device zone (for [`Zone::Floating`]) can change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct When {
     pub local: civil::DateTime,
     pub zone: Zone,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Zone {
     /// Follows whatever zone the device is in.
     Floating,
@@ -135,7 +136,7 @@ pub enum Zone {
 ///
 /// `rule` selects the days and `at` selects the times within each selected
 /// day. Everything is evaluated as local wall-clock time in `zone`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recurrence {
     /// First day the rule can fire on. Also anchors the day for monthly and
     /// yearly rules.
@@ -148,7 +149,7 @@ pub struct Recurrence {
 
 /// Which days a [`Recurrence`] fires on. `every` counts days, weeks, months or
 /// years between firings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rule {
     Daily { every: NonZeroU32 },
     Weekly { every: NonZeroU32, on: Weekdays },
@@ -156,15 +157,19 @@ pub enum Rule {
     Yearly { every: NonZeroU32 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MonthlyOn {
     Day(DayOfMonth),
-    NthWeekday { nth: Nth, weekday: civil::Weekday },
+    NthWeekday {
+        nth: Nth,
+        #[serde(with = "values::weekday")]
+        weekday: civil::Weekday,
+    },
 }
 
 /// Which occurrence of a weekday in a month. There is no fifth, because not
 /// every month has one. Use [`Nth::Last`] instead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Nth {
     First,
     Second,
@@ -174,7 +179,7 @@ pub enum Nth {
 }
 
 /// Clock times to fire at on each day a [`Rule`] selects.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimesOfDay {
     /// Fixed clock times, such as 09:00, 13:00 and 21:00.
     At(ClockTimes),
@@ -182,7 +187,7 @@ pub enum TimesOfDay {
     Every(Window),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum End {
     /// No occurrence after this local time.
     Until(civil::DateTime),
@@ -192,14 +197,14 @@ pub enum End {
 
 /// How a reminder alerts. Describes intent. The platform layer maps it to
 /// notification channels, alarm APIs and so on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alert {
     pub style: AlertStyle,
     /// Re-alert until the occurrence is resolved. Applies to either style.
     pub nudge: Option<Nudge>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlertStyle {
     /// A notification. `sticky` keeps it in the shade until handled, rather
     /// than letting it be swiped away.
@@ -208,7 +213,7 @@ pub enum AlertStyle {
     Alarm,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Nudge {
     pub every: PositiveDuration,
     /// Stop after this many nudges. `None` nudges until resolved.

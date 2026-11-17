@@ -4,8 +4,8 @@ use jiff::{SignedDuration, Timestamp, civil};
 use proptest::prelude::*;
 
 use super::{
-    ClockTimes, DayOfMonth, InvalidValue, PositiveDuration, ReminderId, ResolutionId, Title,
-    Weekdays, Window,
+    ClockTimes, DayOfMonth, InvalidValue, MonthlyOn, PositiveDuration, ReminderId, ResolutionId,
+    Title, Weekdays, Window,
 };
 
 /// Any time of day, to nanosecond precision, so that sub-second differences are
@@ -200,5 +200,70 @@ proptest! {
                 prop_assert_eq!(error, InvalidValue::BlankTitle);
             }
         }
+    }
+}
+
+#[test]
+fn json_the_validated_types_would_not_build_is_refused() {
+    assert!(serde_json::from_str::<Weekdays>("[]").is_err());
+    assert!(serde_json::from_str::<Weekdays>("[7]").is_err());
+    assert!(serde_json::from_str::<DayOfMonth>("0").is_err());
+    assert!(serde_json::from_str::<DayOfMonth>("32").is_err());
+    assert!(serde_json::from_str::<PositiveDuration>("\"PT0S\"").is_err());
+    assert!(serde_json::from_str::<PositiveDuration>("\"-PT1S\"").is_err());
+    assert!(serde_json::from_str::<ClockTimes>("[]").is_err());
+    assert!(
+        serde_json::from_str::<Window>(
+            r#"{"every":"PT1H","start":"10:00:00","end":"09:00:00"}"#
+        )
+        .is_err()
+    );
+    assert!(serde_json::from_str::<Title>("\"   \"").is_err());
+    assert!(
+        serde_json::from_str::<MonthlyOn>(r#"{"NthWeekday":{"nth":"Last","weekday":9}}"#).is_err()
+    );
+}
+
+#[test]
+fn json_the_validated_types_would_build_is_accepted() {
+    assert!(serde_json::from_str::<Weekdays>("[0,4]").is_ok());
+    assert!(serde_json::from_str::<DayOfMonth>("31").is_ok());
+    assert!(serde_json::from_str::<PositiveDuration>("\"PT1S\"").is_ok());
+    assert!(serde_json::from_str::<ClockTimes>(r#"["09:00:00"]"#).is_ok());
+    assert!(
+        serde_json::from_str::<Window>(
+            r#"{"every":"PT1H","start":"09:00:00","end":"10:00:00"}"#
+        )
+        .is_ok()
+    );
+    assert!(serde_json::from_str::<Title>("\"Water plants\"").is_ok());
+    assert!(
+        serde_json::from_str::<MonthlyOn>(r#"{"NthWeekday":{"nth":"Last","weekday":4}}"#).is_ok()
+    );
+}
+
+proptest! {
+    #[test]
+    fn weekdays_survive_json(days in weekday_input()) {
+        prop_assume!(!days.is_empty());
+        let set = Weekdays::new(days).expect("not empty");
+        let json = serde_json::to_string(&set).expect("serialized");
+        prop_assert_eq!(serde_json::from_str::<Weekdays>(&json).expect("parsed"), set);
+    }
+
+    #[test]
+    fn clock_times_survive_json_with_their_nanoseconds(times in clock_time_input()) {
+        prop_assume!(!times.is_empty());
+        let held = ClockTimes::new(times).expect("not empty");
+        let json = serde_json::to_string(&held).expect("serialized");
+        prop_assert_eq!(serde_json::from_str::<ClockTimes>(&json).expect("parsed"), held);
+    }
+
+    #[test]
+    fn positive_durations_survive_json(seconds in 0..1_000_000i64, nanos in 0..1_000_000_000i32) {
+        prop_assume!(seconds > 0 || nanos > 0);
+        let duration = PositiveDuration::new(SignedDuration::new(seconds, nanos)).expect("positive");
+        let json = serde_json::to_string(&duration).expect("serialized");
+        prop_assert_eq!(serde_json::from_str::<PositiveDuration>(&json).expect("parsed"), duration);
     }
 }

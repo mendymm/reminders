@@ -684,6 +684,8 @@ dependencies = [
  "jiff",
  "proptest",
  "rusqlite",
+ "serde",
+ "serde_json",
  "uniffi",
  "uuid",
 ]

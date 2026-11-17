@@ -506,7 +506,7 @@ fn any_end() -> impl Strategy<Value = Option<End>> {
     ]
 }
 
-fn any_recurrence() -> impl Strategy<Value = Recurrence> {
+pub(crate) fn any_recurrence() -> impl Strategy<Value = Recurrence> {
     (any_start(), any_rule(), any_times_of_day(), any_end())
         .prop_map(|(starts_on, rule, at, end)| recurrence(starts_on, rule, at, end))
 }

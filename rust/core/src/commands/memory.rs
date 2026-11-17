@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use super::storage::{Expect, ProgressWrite, ResolutionWrite, Storage, StorageError, WriteSet};
+use super::storage::{
+    ProgressWrite, ResolutionWrite, Storage, StorageError, WriteSet, check_expect,
+};
 use crate::model::{Progress, Reminder, ReminderId, Resolution, ResolutionId};
 
 #[derive(Debug, Default)]
@@ -10,15 +12,6 @@ pub struct MemoryStorage {
     reminders: HashMap<ReminderId, Reminder>,
     progress: HashMap<ReminderId, Progress>,
     resolutions: HashMap<ResolutionId, Resolution>,
-}
-
-fn check(current: Option<u64>, expect: Expect) -> Result<(), StorageError> {
-    match (current, expect) {
-        (None, Expect::Absent) => Ok(()),
-        (Some(_), Expect::Absent) => Err(StorageError::AlreadyExists),
-        (Some(revision), Expect::Revision(expected)) if revision == expected => Ok(()),
-        _ => Err(StorageError::StaleRevision),
-    }
 }
 
 impl Storage for MemoryStorage {
@@ -51,13 +44,13 @@ impl Storage for MemoryStorage {
 
     fn commit(&mut self, writes: WriteSet) -> Result<(), StorageError> {
         if let Some((reminder, expect)) = &writes.reminder {
-            check(
+            check_expect(
                 self.reminders.get(&reminder.id).map(|r| r.meta.revision),
                 *expect,
             )?;
         }
         if let Some(ProgressWrite::Put(progress, expect)) = &writes.progress {
-            check(
+            check_expect(
                 self.progress.get(&progress.reminder_id).map(|p| p.revision),
                 *expect,
             )?;

@@ -26,7 +26,7 @@ type Service = LocalReminders<MemoryStorage>;
 
 /// Noon on the 18th. The daily slots of the 16th, 17th and 18th are past, the
 /// 19th's is not.
-const NOW: &str = "2026-11-18T12:00:00Z";
+pub(crate) const NOW: &str = "2026-11-18T12:00:00Z";
 
 fn service() -> Service {
     LocalReminders::new(MemoryStorage::default())
@@ -36,7 +36,7 @@ fn ts(text: &str) -> Timestamp {
     text.parse().expect("a valid timestamp")
 }
 
-fn ctx(now: &str) -> Context {
+pub(crate) fn ctx(now: &str) -> Context {
     Context {
         now: ts(now),
         device_zone: TimeZone::UTC,
@@ -885,7 +885,7 @@ fn plan_of_kind(kind: u8) -> Plan {
 }
 
 #[derive(Debug, Clone)]
-enum Op {
+pub(crate) enum Op {
     Resolve {
         target: usize,
         slot_day: Option<u8>,
@@ -907,7 +907,7 @@ enum Op {
     },
 }
 
-fn any_op() -> impl Strategy<Value = Op> {
+pub(crate) fn any_op() -> impl Strategy<Value = Op> {
     prop_oneof![
         (0..3usize, prop::option::of(0..6u8), any::<bool>()).prop_map(
             |(target, slot_day, skip)| Op::Resolve {
@@ -921,6 +921,84 @@ fn any_op() -> impl Strategy<Value = Op> {
         (0..3usize, any::<bool>()).prop_map(|(target, on)| Op::Archive { target, on }),
         (0..3usize).prop_map(|target| Op::Delete { target }),
     ]
+}
+
+pub(crate) fn ids() -> [ReminderId; 3] {
+    [rid(1), rid(2), rid(3)]
+}
+
+/// Creates three reminders: a one-off, a daily cadence and a tracker.
+pub(crate) fn seed<S: Storage>(s: &mut LocalReminders<S>, c: &Context) {
+    for (index, id) in ids().iter().enumerate() {
+        let kind = u8::try_from(index).expect("small");
+        s.create(c, *id, draft(plan_of_kind(kind))).expect("created");
+    }
+}
+
+/// What [`apply`] remembers between operations.
+pub(crate) struct Driver {
+    last_resolution: [Option<ResolutionId>; 3],
+    next_resolution: u128,
+}
+
+impl Driver {
+    pub(crate) fn new() -> Self {
+        Self {
+            last_resolution: [None; 3],
+            next_resolution: 100,
+        }
+    }
+}
+
+/// Runs one operation against the three seeded reminders.
+pub(crate) fn apply<S: Storage>(
+    s: &mut LocalReminders<S>,
+    c: &Context,
+    driver: &mut Driver,
+    op: Op,
+) -> Result<(), CommandError> {
+    let ids = ids();
+    match op {
+        Op::Resolve {
+            target,
+            slot_day,
+            skip,
+        } => {
+            driver.next_resolution += 1;
+            let outcome = match (slot_day, skip) {
+                (Some(day), false) => done(Some(day_slot(day))),
+                (Some(day), true) => skipped(day_slot(day)),
+                (None, _) => done(None),
+            };
+            let resolution = xid(driver.next_resolution);
+            s.resolve(c, ids[target], resolution, outcome, None)?;
+            driver.last_resolution[target] = Some(resolution);
+            Ok(())
+        }
+        Op::Undo { target } => match driver.last_resolution[target] {
+            Some(resolution) => s.undo(c, ids[target], resolution),
+            None => Ok(()),
+        },
+        Op::SetPlan { target, kind } => {
+            let state = s.get(ids[target])?;
+            s.edit(
+                c,
+                ids[target],
+                state.reminder.meta.revision,
+                replace_plan(plan_of_kind(kind)),
+            )
+            .map(|_| ())
+        }
+        Op::Archive { target, on } => {
+            let state = s.get(ids[target])?;
+            s.edit(c, ids[target], state.reminder.meta.revision, archive(on))
+                .map(|_| ())
+        }
+        Op::Delete { target } => {
+            let state = s.get(ids[target])?;
+            s.delete(c, ids[target], state.reminder.meta.revision)
+        }
+    }
 }
 
 /// Reminder and progress revisions per reminder.
@@ -989,56 +1067,13 @@ proptest! {
     ) {
         let mut s = service();
         let c = ctx(NOW);
-        let ids = [rid(1), rid(2), rid(3)];
-        for (index, id) in ids.iter().enumerate() {
-            let kind = u8::try_from(index).expect("small");
-            s.create(&c, *id, draft(plan_of_kind(kind))).expect("created");
-        }
-        let mut last_resolution: [Option<ResolutionId>; 3] = [None; 3];
-        let mut next_resolution = 100u128;
+        seed(&mut s, &c);
+        let mut driver = Driver::new();
         let mut previous = Revisions::new();
         check_consistent(&s, &c, &mut previous)?;
 
         for op in ops {
-            match op {
-                Op::Resolve { target, slot_day, skip } => {
-                    next_resolution += 1;
-                    let outcome = match (slot_day, skip) {
-                        (Some(day), false) => done(Some(day_slot(day))),
-                        (Some(day), true) => skipped(day_slot(day)),
-                        (None, _) => done(None),
-                    };
-                    let resolution = xid(next_resolution);
-                    if s.resolve(&c, ids[target], resolution, outcome, None).is_ok() {
-                        last_resolution[target] = Some(resolution);
-                    }
-                }
-                Op::Undo { target } => {
-                    if let Some(resolution) = last_resolution[target] {
-                        let _ = s.undo(&c, ids[target], resolution);
-                    }
-                }
-                Op::SetPlan { target, kind } => {
-                    if let Ok(state) = s.get(ids[target]) {
-                        let _ = s.edit(
-                            &c,
-                            ids[target],
-                            state.reminder.meta.revision,
-                            replace_plan(plan_of_kind(kind)),
-                        );
-                    }
-                }
-                Op::Archive { target, on } => {
-                    if let Ok(state) = s.get(ids[target]) {
-                        let _ = s.edit(&c, ids[target], state.reminder.meta.revision, archive(on));
-                    }
-                }
-                Op::Delete { target } => {
-                    if let Ok(state) = s.get(ids[target]) {
-                        let _ = s.delete(&c, ids[target], state.reminder.meta.revision);
-                    }
-                }
-            }
+            let _ = apply(&mut s, &c, &mut driver, op);
             check_consistent(&s, &c, &mut previous)?;
         }
     }

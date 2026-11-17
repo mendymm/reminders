@@ -1,6 +1,6 @@
 //! The persistence port the command layer works against. SQLite implements it
-//! later. Writes go in as one [`WriteSet`] that must apply atomically, with the
-//! revisions each write expects checked.
+//! (see `store`). Writes go in as one [`WriteSet`] that must apply atomically,
+//! with the revisions each write expects checked.
 
 use std::fmt;
 
@@ -15,6 +15,8 @@ pub enum StorageError {
     Missing,
     /// A row changed since it was read.
     StaleRevision,
+    /// Stored data could not be turned back into a valid model value.
+    Corrupt(String),
     /// The backend failed.
     Backend(String),
 }
@@ -25,6 +27,7 @@ impl fmt::Display for StorageError {
             Self::AlreadyExists => write!(f, "the row already exists"),
             Self::Missing => write!(f, "the row does not exist"),
             Self::StaleRevision => write!(f, "the row changed since it was read"),
+            Self::Corrupt(message) => write!(f, "stored data is invalid: {message}"),
             Self::Backend(message) => write!(f, "storage failed: {message}"),
         }
     }
@@ -39,6 +42,17 @@ pub enum Expect {
     Absent,
     /// A row at exactly this revision.
     Revision(u64),
+}
+
+/// Checks a row's current revision, `None` when there is no row, against what a
+/// write expects. Every [`Storage`] applies this rule.
+pub fn check_expect(current: Option<u64>, expect: Expect) -> Result<(), StorageError> {
+    match (current, expect) {
+        (None, Expect::Absent) => Ok(()),
+        (Some(_), Expect::Absent) => Err(StorageError::AlreadyExists),
+        (Some(revision), Expect::Revision(expected)) if revision == expected => Ok(()),
+        _ => Err(StorageError::StaleRevision),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

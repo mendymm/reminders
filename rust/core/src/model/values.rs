@@ -7,6 +7,7 @@
 use std::fmt;
 
 use jiff::{SignedDuration, civil};
+use serde::{Deserialize, Serialize};
 
 /// Why a validated value could not be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum InvalidValue {
     NonPositiveDuration,
     WindowReversed,
     BlankTitle,
+    WeekdayOutOfRange(u8),
 }
 
 impl fmt::Display for InvalidValue {
@@ -30,6 +32,9 @@ impl fmt::Display for InvalidValue {
             Self::NonPositiveDuration => write!(f, "duration must be positive"),
             Self::WindowReversed => write!(f, "window must not start after it ends"),
             Self::BlankTitle => write!(f, "title must not be blank"),
+            Self::WeekdayOutOfRange(offset) => {
+                write!(f, "weekday offset must be 0 to 6, got {offset}")
+            }
         }
     }
 }
@@ -37,7 +42,8 @@ impl fmt::Display for InvalidValue {
 impl std::error::Error for InvalidValue {}
 
 /// A non-empty set of weekdays. Equality ignores the order they were given in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
 pub struct Weekdays(u8);
 
 impl Weekdays {
@@ -69,7 +75,8 @@ impl Weekdays {
 }
 
 /// A day of the month, 1 to 31.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub struct DayOfMonth(u8);
 
 impl DayOfMonth {
@@ -87,7 +94,8 @@ impl DayOfMonth {
 }
 
 /// A duration greater than zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "SignedDuration", into = "SignedDuration")]
 pub struct PositiveDuration(SignedDuration);
 
 impl PositiveDuration {
@@ -105,7 +113,8 @@ impl PositiveDuration {
 }
 
 /// A non-empty set of clock times, sorted and without duplicates.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<civil::Time>", into = "Vec<civil::Time>")]
 pub struct ClockTimes(Vec<civil::Time>);
 
 impl ClockTimes {
@@ -127,7 +136,8 @@ impl ClockTimes {
 
 /// A repeating window within a day: first at `start`, then every `every`, never
 /// later than `end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "WindowRaw", into = "WindowRaw")]
 pub struct Window {
     every: PositiveDuration,
     start: civil::Time,
@@ -161,7 +171,8 @@ impl Window {
 }
 
 /// A reminder title: not blank, with surrounding whitespace trimmed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct Title(String);
 
 impl Title {
@@ -176,5 +187,137 @@ impl Title {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+// Serde goes through the constructors, so stored or received data cannot build
+// a value that `new` would refuse.
+
+impl From<Weekdays> for Vec<u8> {
+    /// Monday-based offsets, 0 to 6, Monday first.
+    fn from(days: Weekdays) -> Self {
+        days.iter()
+            .map(|day| u8::try_from(day.to_monday_zero_offset()).unwrap_or(0))
+            .collect()
+    }
+}
+
+impl TryFrom<Vec<u8>> for Weekdays {
+    type Error = InvalidValue;
+
+    fn try_from(offsets: Vec<u8>) -> Result<Self, Self::Error> {
+        let days = offsets
+            .into_iter()
+            .map(|offset| {
+                i8::try_from(offset)
+                    .ok()
+                    .and_then(|signed| civil::Weekday::from_monday_zero_offset(signed).ok())
+                    .ok_or(InvalidValue::WeekdayOutOfRange(offset))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(days)
+    }
+}
+
+impl TryFrom<u8> for DayOfMonth {
+    type Error = InvalidValue;
+
+    fn try_from(day: u8) -> Result<Self, Self::Error> {
+        Self::new(day)
+    }
+}
+
+impl From<DayOfMonth> for u8 {
+    fn from(day: DayOfMonth) -> Self {
+        day.get()
+    }
+}
+
+impl TryFrom<SignedDuration> for PositiveDuration {
+    type Error = InvalidValue;
+
+    fn try_from(duration: SignedDuration) -> Result<Self, Self::Error> {
+        Self::new(duration)
+    }
+}
+
+impl From<PositiveDuration> for SignedDuration {
+    fn from(duration: PositiveDuration) -> Self {
+        duration.get()
+    }
+}
+
+impl TryFrom<Vec<civil::Time>> for ClockTimes {
+    type Error = InvalidValue;
+
+    fn try_from(times: Vec<civil::Time>) -> Result<Self, Self::Error> {
+        Self::new(times)
+    }
+}
+
+impl From<ClockTimes> for Vec<civil::Time> {
+    fn from(times: ClockTimes) -> Self {
+        times.0
+    }
+}
+
+/// The serialized form of a [`Window`].
+#[derive(Serialize, Deserialize)]
+struct WindowRaw {
+    every: PositiveDuration,
+    start: civil::Time,
+    end: civil::Time,
+}
+
+impl TryFrom<WindowRaw> for Window {
+    type Error = InvalidValue;
+
+    fn try_from(raw: WindowRaw) -> Result<Self, Self::Error> {
+        Self::new(raw.every, raw.start, raw.end)
+    }
+}
+
+impl From<Window> for WindowRaw {
+    fn from(window: Window) -> Self {
+        Self {
+            every: window.every(),
+            start: window.start(),
+            end: window.end(),
+        }
+    }
+}
+
+impl TryFrom<String> for Title {
+    type Error = InvalidValue;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(text)
+    }
+}
+
+impl From<Title> for String {
+    fn from(title: Title) -> Self {
+        title.0
+    }
+}
+
+/// Serde for `jiff::civil::Weekday`, which has none: a Monday-based offset, 0 to 6.
+pub(super) mod weekday {
+    use jiff::civil;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::InvalidValue;
+
+    pub fn serialize<S: Serializer>(day: &civil::Weekday, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(u8::try_from(day.to_monday_zero_offset()).unwrap_or(0))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<civil::Weekday, D::Error> {
+        let offset = u8::deserialize(deserializer)?;
+        i8::try_from(offset)
+            .ok()
+            .and_then(|signed| civil::Weekday::from_monday_zero_offset(signed).ok())
+            .ok_or_else(|| D::Error::custom(InvalidValue::WeekdayOutOfRange(offset)))
     }
 }
