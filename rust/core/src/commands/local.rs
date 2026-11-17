@@ -1,6 +1,6 @@
 //! [`LocalReminders`]: the command layer over a [`Storage`].
 
-use jiff::tz::TimeZone;
+use jiff::Timestamp;
 
 use super::validate::validate_plan;
 use super::{
@@ -8,11 +8,12 @@ use super::{
     Resolved, Unresolved, UnresolvedReason, Upcoming, UpcomingList,
 };
 use super::storage::{Expect, ProgressWrite, ResolutionWrite, Storage, WriteSet};
-use crate::instant::instant_of;
+use crate::instant::{ZoneError, instant_of, zone_of};
 use crate::model::{
-    Alert, Cadence, Meta, Outcome, Plan, Progress, Reminder, ReminderId, Resolution, ResolutionId,
-    Slot, Zone,
+    Alert, Cadence, End, Meta, Outcome, Plan, Progress, ProgressState, Reminder, ReminderId,
+    Resolution, ResolutionId, Slot, Watermark, Zone,
 };
+use crate::recurrence::next_slot;
 
 pub struct LocalReminders<S: Storage> {
     pub(super) storage: S,
@@ -34,6 +35,56 @@ impl<S: Storage> LocalReminders<S> {
     fn state_of(&self, reminder: Reminder) -> Result<ReminderState, CommandError> {
         let progress = self.storage.progress(reminder.id)?;
         Ok(ReminderState { reminder, progress })
+    }
+
+    /// For each reminder that is neither archived nor deleted, the slot `next`
+    /// picks, ordered by when it fires, at most `limit`. A reminder `next` cannot
+    /// resolve is reported, not allowed to fail the whole call.
+    fn schedule_list(
+        &self,
+        limit: usize,
+        next: impl Fn(&Plan, &Progress) -> Result<Option<(Slot, Timestamp)>, ZoneError>,
+    ) -> Result<UpcomingList, CommandError> {
+        let mut upcoming = Vec::new();
+        let mut unresolved = Vec::new();
+
+        for reminder in self.storage.reminders()? {
+            if reminder.meta.deleted_at.is_some() || reminder.archived_at.is_some() {
+                continue;
+            }
+            let Some((_, alert)) = scheduled(&reminder.plan) else {
+                continue;
+            };
+            let Some(progress) = self.storage.progress(reminder.id)? else {
+                unresolved.push(Unresolved {
+                    reminder_id: reminder.id,
+                    reason: UnresolvedReason::MissingProgress,
+                });
+                continue;
+            };
+            match next(&reminder.plan, &progress) {
+                Ok(Some((slot, at))) => upcoming.push(Upcoming {
+                    reminder_id: reminder.id,
+                    title: reminder.title.clone(),
+                    slot,
+                    at,
+                    alert: alert.clone(),
+                }),
+                Ok(None) => {}
+                Err(error) => unresolved.push(Unresolved {
+                    reminder_id: reminder.id,
+                    reason: UnresolvedReason::Zone(error),
+                }),
+            }
+        }
+
+        upcoming.sort_by_key(|item| (item.at, item.reminder_id.0));
+        upcoming.truncate(limit);
+        unresolved.sort_by_key(|item| item.reminder_id.0);
+        Ok(UpcomingList {
+            upcoming,
+            unresolved,
+        })
     }
 }
 
@@ -335,49 +386,19 @@ impl<S: Storage> Reminders for LocalReminders<S> {
     }
 
     fn upcoming(&self, ctx: &Context, limit: usize) -> Result<UpcomingList, CommandError> {
-        let device: &TimeZone = &ctx.device_zone;
-        let mut upcoming = Vec::new();
-        let mut unresolved = Vec::new();
-
-        for reminder in self.storage.reminders()? {
-            if reminder.meta.deleted_at.is_some() || reminder.archived_at.is_some() {
-                continue;
-            }
-            let Some((zone, alert)) = scheduled(&reminder.plan) else {
-                continue;
+        self.schedule_list(limit, |plan, progress| {
+            let Some((zone, _)) = scheduled(plan) else {
+                return Ok(None);
             };
-            let Some(progress) = self.storage.progress(reminder.id)? else {
-                unresolved.push(Unresolved {
-                    reminder_id: reminder.id,
-                    reason: UnresolvedReason::MissingProgress,
-                });
-                continue;
+            let Some(slot) = progress.next_pending(plan) else {
+                return Ok(None);
             };
-            let Some(slot) = progress.next_pending(&reminder.plan) else {
-                continue;
-            };
-            match instant_of(slot, zone, device) {
-                Ok(at) => upcoming.push(Upcoming {
-                    reminder_id: reminder.id,
-                    title: reminder.title.clone(),
-                    slot,
-                    at,
-                    alert: alert.clone(),
-                }),
-                Err(error) => unresolved.push(Unresolved {
-                    reminder_id: reminder.id,
-                    reason: UnresolvedReason::Zone(error),
-                }),
-            }
-        }
-
-        upcoming.sort_by_key(|item| (item.at, item.reminder_id.0));
-        upcoming.truncate(limit);
-        unresolved.sort_by_key(|item| item.reminder_id.0);
-        Ok(UpcomingList {
-            upcoming,
-            unresolved,
+            Ok(Some((slot, instant_of(slot, zone, &ctx.device_zone)?)))
         })
+    }
+
+    fn alarms(&self, ctx: &Context, limit: usize) -> Result<UpcomingList, CommandError> {
+        self.schedule_list(limit, |plan, progress| next_alarm(plan, progress, ctx))
     }
 
     fn history(&self, id: ReminderId) -> Result<Vec<Resolution>, CommandError> {
@@ -388,5 +409,60 @@ impl<S: Storage> Reminders for LocalReminders<S> {
             .into_iter()
             .filter(|resolution| resolution.deleted_at.is_none())
             .collect())
+    }
+}
+
+/// The most already-passed slots `next_alarm` steps over before giving up. It
+/// only matters for a recurrence that ends after a count, or one that has slots
+/// every few minutes and was not looked at for a long time.
+const MAX_PASSED_SLOTS: usize = 10_000;
+
+/// The first slot of a plan that fires after `ctx.now`, with when it fires. Slots
+/// that already passed unresolved are stepped over, not reported.
+fn next_alarm(
+    plan: &Plan,
+    progress: &Progress,
+    ctx: &Context,
+) -> Result<Option<(Slot, Timestamp)>, ZoneError> {
+    match (&progress.state, plan) {
+        (ProgressState::Once { done_at: None }, Plan::Once { due: Some(due) }) => {
+            let slot = Slot(due.when.local);
+            let at = instant_of(slot, &due.when.zone, &ctx.device_zone)?;
+            Ok((at > ctx.now).then_some((slot, at)))
+        }
+        (
+            ProgressState::Cadence { current, .. },
+            Plan::Ongoing {
+                cadence: Some(cadence),
+            },
+        ) => {
+            let recurrence = &cadence.recurrence;
+            let mut mark = *current;
+            // Jump to now instead of stepping through every slot since the
+            // watermark. A recurrence that ends after a count needs the count of
+            // slots passed, so it steps.
+            if !matches!(recurrence.end, Some(End::Count(_))) {
+                let zone = zone_of(&recurrence.zone, &ctx.device_zone)?;
+                let local_now = Slot(zone.to_datetime(ctx.now));
+                if mark.through.is_none_or(|through| through < local_now) {
+                    mark.through = Some(local_now);
+                }
+            }
+            for _ in 0..MAX_PASSED_SLOTS {
+                let Some(slot) = next_slot(recurrence, mark) else {
+                    return Ok(None);
+                };
+                let at = instant_of(slot, &recurrence.zone, &ctx.device_zone)?;
+                if at > ctx.now {
+                    return Ok(Some((slot, at)));
+                }
+                mark = Watermark {
+                    through: Some(slot),
+                    handled: mark.handled.saturating_add(1),
+                };
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
     }
 }

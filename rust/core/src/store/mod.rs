@@ -12,7 +12,9 @@ pub(crate) mod tests;
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
 use crate::commands::{
     ProgressWrite, ResolutionWrite, Storage, StorageError, WriteSet, check_expect,
@@ -84,6 +86,25 @@ impl SqliteStorage {
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
+}
+
+/// Writes a consistent copy of the database at `source` to a new file at
+/// `destination`.
+///
+/// This is `VACUUM INTO`, so the copy has everything committed, including what is
+/// still in the write-ahead log, which copying the file itself would miss. The
+/// source is opened as it is: it is not migrated, and it is not created if it does
+/// not exist. `destination` must not exist.
+pub fn copy_database(source: &Path, destination: &Path) -> Result<(), StorageError> {
+    let conn = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let destination = destination.to_str().ok_or_else(|| {
+        StorageError::Backend("the destination path is not valid UTF-8".to_owned())
+    })?;
+    conn.execute("VACUUM INTO ?1", params![destination])?;
+    Ok(())
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), StorageError> {

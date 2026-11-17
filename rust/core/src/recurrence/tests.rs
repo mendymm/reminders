@@ -297,7 +297,7 @@ const HORIZON_DAYS: i32 = 800;
 /// Every slot from `starts_on` through `last_day`, found by walking the calendar
 /// one day at a time and counting weeks, months and years as they roll over.
 /// Deliberately a different formulation from `next_slot`.
-fn oracle(rec: &Recurrence, last_day: civil::Date) -> Vec<Slot> {
+pub(crate) fn oracle(rec: &Recurrence, last_day: civil::Date) -> Vec<Slot> {
     let times = oracle_times(&rec.at);
     let mut slots = Vec::new();
     let mut day = rec.starts_on;

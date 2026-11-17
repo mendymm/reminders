@@ -52,13 +52,18 @@ impl std::error::Error for ZoneError {}
 /// The instant `slot` fires at in `zone`. `device` is the zone the device is in
 /// now, used for [`Zone::Floating`].
 pub fn instant_of(slot: Slot, zone: &Zone, device: &TimeZone) -> Result<Timestamp, ZoneError> {
-    let fixed;
-    let tz = match zone {
-        Zone::Floating => device,
+    zone_of(zone, device)?
+        .to_timestamp(slot.0)
+        .map_err(|_| ZoneError::OutOfRange)
+}
+
+/// The time zone a [`Zone`] means: the device's for [`Zone::Floating`], or the one
+/// named in the time zone database.
+pub fn zone_of(zone: &Zone, device: &TimeZone) -> Result<TimeZone, ZoneError> {
+    match zone {
+        Zone::Floating => Ok(device.clone()),
         Zone::Fixed(name) => {
-            fixed = TimeZone::get(name).map_err(|_| ZoneError::UnknownZone(name.clone()))?;
-            &fixed
+            TimeZone::get(name).map_err(|_| ZoneError::UnknownZone(name.clone()))
         }
-    };
-    tz.to_timestamp(slot.0).map_err(|_| ZoneError::OutOfRange)
+    }
 }

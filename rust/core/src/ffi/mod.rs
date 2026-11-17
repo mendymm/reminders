@@ -16,6 +16,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub use error::ReminderError;
@@ -40,6 +41,16 @@ pub fn new_resolution_id(now_ms: i64) -> Result<String, ReminderError> {
     Ok(domain::ResolutionId::new(timestamp_from_ms(now_ms)?)
         .0
         .to_string())
+}
+
+/// Writes a consistent copy of the database at `source` to a new file at
+/// `destination`, which must not exist. The copy includes everything committed,
+/// including what a copy of the file alone would miss. The source is left as it is
+/// and is not migrated.
+#[uniffi::export]
+pub fn copy_database(source: String, destination: String) -> Result<(), ReminderError> {
+    crate::store::copy_database(Path::new(&source), Path::new(&destination))
+        .map_err(storage_error)
 }
 
 #[derive(uniffi::Object)]
@@ -172,6 +183,15 @@ impl ReminderStore {
         let ctx = ctx.into_domain()?;
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         Ok(self.lock().upcoming(&ctx, limit)?.into())
+    }
+
+    /// The next slot of each reminder that has not fired yet, in the order they
+    /// fire, at most `limit`. Set alarms from this. A slot that already passed
+    /// unresolved is skipped, so an ignored slot never hides the ones after it.
+    pub fn alarms(&self, ctx: CallContext, limit: u32) -> Result<UpcomingList, ReminderError> {
+        let ctx = ctx.into_domain()?;
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        Ok(self.lock().alarms(&ctx, limit)?.into())
     }
 
     /// A reminder's resolutions, newest first, without retracted ones.

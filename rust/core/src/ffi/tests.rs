@@ -488,3 +488,39 @@ fn nth_weekday_rules_cross_the_boundary() {
     let across = domain::Plan::try_from(plan.clone()).expect("a valid plan");
     assert_eq!(Plan::from(across), plan);
 }
+
+#[test]
+fn a_copied_database_opens_as_a_store_with_the_same_reminders() {
+    let directory = std::env::temp_dir();
+    let name = |suffix: &str| directory.join(format!("reminder-ffi-test-{}-{suffix}.db", id(7)));
+    let (source, destination) = (name("source"), name("copy"));
+    for path in [&source, &destination] {
+        for extension in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(extension);
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    let store = ReminderStore::open(source.to_string_lossy().into_owned()).expect("opened");
+    let created = store
+        .create(context(NOW_MS), id(1), pills())
+        .expect("created");
+
+    super::copy_database(
+        source.to_string_lossy().into_owned(),
+        destination.to_string_lossy().into_owned(),
+    )
+    .expect("copied");
+    let copy = ReminderStore::open(destination.to_string_lossy().into_owned()).expect("opened");
+    assert_eq!(copy.get(id(1)).expect("in the copy"), created);
+
+    drop((store, copy));
+    for path in [&source, &destination] {
+        for extension in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(extension);
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}

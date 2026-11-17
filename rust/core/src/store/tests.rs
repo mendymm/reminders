@@ -542,3 +542,85 @@ proptest! {
         }
     }
 }
+
+// --- copying a database ---------------------------------------------------------
+
+fn persistent_draft() -> ReminderDraft {
+    ReminderDraft {
+        title: Title::new("Persistent").expect("not blank"),
+        notes: "kept".to_owned(),
+        plan: Plan::Once { due: None },
+    }
+}
+
+#[test]
+fn a_copy_includes_what_is_still_in_the_write_ahead_log() {
+    let source = TempDatabase::new();
+    let destination = TempDatabase::new();
+    // The source stays open, so its recent writes are in the log, not the file.
+    let mut service = LocalReminders::new(SqliteStorage::open(&source.0).expect("opened"));
+    let created = service
+        .create(&ctx(NOW), rid(1), persistent_draft())
+        .expect("created");
+
+    super::copy_database(&source.0, &destination.0).expect("copied");
+
+    let copy = LocalReminders::new(SqliteStorage::open(&destination.0).expect("opened the copy"));
+    assert_eq!(copy.get(rid(1)).expect("in the copy"), created);
+}
+
+#[test]
+fn a_copy_is_independent_of_its_source() {
+    let source = TempDatabase::new();
+    let destination = TempDatabase::new();
+    let mut original = LocalReminders::new(SqliteStorage::open(&source.0).expect("opened"));
+    original
+        .create(&ctx(NOW), rid(1), persistent_draft())
+        .expect("created");
+    super::copy_database(&source.0, &destination.0).expect("copied");
+
+    original
+        .create(&ctx(NOW), rid(2), persistent_draft())
+        .expect("created after the copy");
+
+    let copy = LocalReminders::new(SqliteStorage::open(&destination.0).expect("opened the copy"));
+    assert_eq!(copy.list().expect("listed").len(), 1);
+    assert_eq!(original.list().expect("listed").len(), 2);
+}
+
+#[test]
+fn copying_does_not_migrate_or_create_the_source() {
+    let missing = TempDatabase::new();
+    let destination = TempDatabase::new();
+
+    assert!(super::copy_database(&missing.0, &destination.0).is_err());
+    assert!(!missing.0.exists(), "the source was created");
+    assert!(!destination.0.exists(), "a failed copy left a file");
+
+    // A database with no schema stays that way.
+    {
+        let conn = Connection::open(&missing.0).expect("created");
+        conn.execute_batch("CREATE TABLE note (text TEXT)").expect("table");
+    }
+    super::copy_database(&missing.0, &destination.0).expect("copied");
+    let conn = Connection::open(&missing.0).expect("opened");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("read");
+    assert_eq!(version, 0);
+}
+
+#[test]
+fn copying_onto_an_existing_database_is_refused() {
+    let source = TempDatabase::new();
+    let destination = TempDatabase::new();
+    drop(SqliteStorage::open(&source.0).expect("opened"));
+    let mut existing = LocalReminders::new(SqliteStorage::open(&destination.0).expect("opened"));
+    let kept = existing
+        .create(&ctx(NOW), rid(1), persistent_draft())
+        .expect("created");
+
+    assert!(super::copy_database(&source.0, &destination.0).is_err());
+
+    assert_eq!(existing.get(rid(1)).expect("still there"), kept);
+}

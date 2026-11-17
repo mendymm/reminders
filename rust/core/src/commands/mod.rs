@@ -256,6 +256,13 @@ pub trait Reminders {
     /// by when they fire, at most `limit`.
     fn upcoming(&self, ctx: &Context, limit: usize) -> Result<UpcomingList, CommandError>;
 
+    /// For each reminder that is neither archived nor deleted, the next slot that
+    /// has not fired yet, ordered by when it fires, at most `limit`. This is what
+    /// to set alarms from. Unlike [`Reminders::upcoming`], a slot that already
+    /// passed unresolved is skipped, not repeated, so an ignored slot never hides
+    /// the ones after it.
+    fn alarms(&self, ctx: &Context, limit: usize) -> Result<UpcomingList, CommandError>;
+
     /// A reminder's resolutions, newest first, without retracted ones.
     fn history(&self, id: ReminderId) -> Result<Vec<Resolution>, CommandError>;
 }

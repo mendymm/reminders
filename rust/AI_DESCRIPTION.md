@@ -121,6 +121,7 @@ Every command takes a `Context { now, device_zone }`. Identifiers come from the 
 | `undo(ctx, id, resolution_id)` | The resolution that is `Progress::last_resolution` rolls progress back and is retracted. A resolution that moved nothing (no slot) is just retracted. Any other is `NotLatest`. |
 | `get`, `list` | A reminder with its progress. `list` is oldest first and leaves out deleted ones. |
 | `upcoming(ctx, limit)` | Each unarchived, undeleted reminder's pending slot, resolved to an instant and sorted by instant. Overdue slots are included. Reminders whose zone cannot be resolved, or that lack a progress row, are returned in `unresolved`. |
+| `alarms(ctx, limit)` | For each unarchived, undeleted reminder, the next slot that has not fired yet, resolved to an instant and sorted by instant. A slot that already passed unresolved is skipped, not repeated, so an ignored slot never hides the ones after it. A one-off only counts while its due time is ahead. Unresolvable reminders are returned in `unresolved`. This is what to set alarms from. |
 | `history(id)` | A reminder's resolutions, newest first, without retracted ones. |
 
 `resolve` by plan:
@@ -154,14 +155,15 @@ A plan is rejected if a `Fixed` zone name is unknown to the time zone database o
 - **Progress** has a `kind` of `once` or `cadence` and typed columns for the watermark and its previous value. **Resolutions** have an outcome of `done` or `skipped` and an optional slot. CHECK constraints tie the columns to the kind or outcome, and foreign keys tie progress and resolutions to their reminder.
 - **Commits** run in one immediate transaction. Every expectation is checked before anything is written, so a refused write set changes nothing. Errors match `MemoryStorage`'s.
 - **Corrupt data.** A row that cannot be turned back into a valid model value is reported as `StorageError::Corrupt`.
+- **Copying.** `copy_database(source, destination)` writes a consistent copy of a database with `VACUUM INTO`, so it includes what is still in the write-ahead log, which copying the file would miss. It opens the source as it is: no migration, and no file is created if the source is missing. The destination must not exist.
 
 ## The FFI layer (`ffi`)
 
 `ReminderStore` is the one exported object. It owns a `LocalReminders<SqliteStorage>` behind a mutex, so calls are serialized. Calls block, so Kotlin makes them off the UI thread.
 
 - **Constructors:** `open(path)` and `open_in_memory()`.
-- **Methods:** `create`, `edit`, `delete`, `resolve`, `undo`, `get`, `list`, `upcoming` and `history`, with the same meaning as the commands they wrap.
-- **IDs:** `new_reminder_id(now_ms)` and `new_resolution_id(now_ms)` return UUIDv7 text, so Kotlin never invents ids.
+- **Methods:** `create`, `edit`, `delete`, `resolve`, `undo`, `get`, `list`, `upcoming`, `alarms` and `history`, with the same meaning as the commands they wrap.
+- **Free functions:** `new_reminder_id(now_ms)` and `new_resolution_id(now_ms)` return UUIDv7 text, so Kotlin never invents ids. `copy_database(source, destination)` is the store's copy, for keeping one database file per app version.
 - **Context:** commands that need the time take a `CallContext { now_ms, device_zone }` on every call. `device_zone` is an IANA zone name. An unknown one is `InvalidInput`. (The model's `Context` is renamed because Android has its own.)
 - **Mirror types** (`ffi/types.rs`) copy the model one to one using only what UniFFI carries. Instants are Unix milliseconds, ids are UUID text, local dates and times are ISO 8601 text, durations are `std::time::Duration`, and weekdays are an enum. `Due.when` is `Due.at` because `when` is a Kotlin keyword.
 - **Input** is turned into model values through the model's constructors. Anything the model would refuse comes back as `ReminderError::InvalidInput` with the reason.

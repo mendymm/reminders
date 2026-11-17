@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, ToSpan, civil};
+use jiff::{SignedDuration, Timestamp, ToSpan, civil};
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ use crate::model::{
     Watermark, When, Zone,
 };
 use crate::progress::TransitionError;
+use crate::recurrence::tests::{any_recurrence, oracle};
 
 type Service = LocalReminders<MemoryStorage>;
 
@@ -871,6 +872,198 @@ fn upcoming_reports_reminders_it_cannot_schedule() {
             },
         ]
     );
+}
+
+// --- alarms ---------------------------------------------------------------
+
+fn slots_of(list: &super::UpcomingList) -> Vec<Slot> {
+    list.upcoming.iter().map(|item| item.slot).collect()
+}
+
+#[test]
+fn alarms_skip_a_slot_that_already_passed_unresolved() {
+    let mut s = service();
+    let c = ctx(NOW);
+    create(&mut s, 1, daily_plan());
+
+    // The 16th, 17th and 18th have all passed unresolved. The oldest is still
+    // what is pending, but the alarm is for the next one to fire.
+    assert_eq!(s.upcoming(&c, 10).expect("upcoming").upcoming[0].slot, day_slot(0));
+    let alarms = s.alarms(&c, 10).expect("alarms");
+    assert_eq!(slots_of(&alarms), vec![day_slot(3)]);
+    assert_eq!(alarms.upcoming[0].at, ts("2026-11-19T09:00:00Z"));
+    assert!(alarms.unresolved.is_empty());
+}
+
+#[test]
+fn a_slot_firing_right_now_is_not_the_next_alarm() {
+    let mut s = service();
+    create(&mut s, 1, daily_plan());
+
+    let before = s.alarms(&ctx("2026-11-19T08:59:59Z"), 10).expect("alarms");
+    assert_eq!(slots_of(&before), vec![day_slot(3)]);
+    let at = s.alarms(&ctx("2026-11-19T09:00:00Z"), 10).expect("alarms");
+    assert_eq!(slots_of(&at), vec![day_slot(4)]);
+}
+
+#[test]
+fn alarms_for_a_one_off_cover_only_a_due_time_still_ahead() {
+    let mut s = service();
+    create(&mut s, 1, once_plan());
+
+    let ahead = s.alarms(&ctx(NOW), 10).expect("alarms");
+    assert_eq!(ahead.upcoming.len(), 1);
+    assert_eq!(ahead.upcoming[0].at, ts("2026-11-20T09:00:00Z"));
+
+    let passed = s.alarms(&ctx("2026-11-21T00:00:00Z"), 10).expect("alarms");
+    assert!(passed.upcoming.is_empty());
+    // Still pending, only not an alarm any more.
+    assert_eq!(
+        s.upcoming(&ctx("2026-11-21T00:00:00Z"), 10)
+            .expect("upcoming")
+            .upcoming
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn alarms_for_a_counted_recurrence_end_with_its_last_slot() {
+    let mut s = service();
+    let counted = daily(Zone::Floating, 9, Some(End::Count(NonZeroU32::new(3).expect("three"))));
+    create(&mut s, 1, counted);
+
+    // After the second slot, the third is still to come.
+    let before_last = s.alarms(&ctx("2026-11-17T12:00:00Z"), 10).expect("alarms");
+    assert_eq!(slots_of(&before_last), vec![day_slot(2)]);
+    // After the third has passed unresolved, there is nothing left.
+    let after_last = s.alarms(&ctx(NOW), 10).expect("alarms");
+    assert!(after_last.upcoming.is_empty());
+}
+
+#[test]
+fn alarms_read_a_fixed_zone_in_that_zone() {
+    let mut s = service();
+    create(
+        &mut s,
+        1,
+        daily(Zone::Fixed("America/New_York".to_owned()), 9, None),
+    );
+
+    // 12:00Z is 07:00 in New York, so the 09:00 slot of the 18th is still ahead.
+    let alarms = s.alarms(&ctx(NOW), 10).expect("alarms");
+    assert_eq!(slots_of(&alarms), vec![day_slot(2)]);
+    assert_eq!(alarms.upcoming[0].at, ts("2026-11-18T14:00:00Z"));
+}
+
+#[test]
+fn alarms_leave_out_what_cannot_alert_and_are_ordered_by_when_they_fire() {
+    let mut s = service();
+    let c = ctx(NOW);
+    create(&mut s, 1, daily_plan());
+    create(&mut s, 2, once_plan());
+    create(
+        &mut s,
+        3,
+        once_due(civil::date(2026, 11, 19).at(8, 0, 0, 0), Zone::Floating),
+    );
+    create(&mut s, 4, tracker_plan());
+    create(&mut s, 5, once_plan());
+    s.edit(&c, rid(5), 1, archive(true)).expect("archived");
+    create(&mut s, 6, once_plan());
+    s.delete(&c, rid(6), 1).expect("deleted");
+    create(&mut s, 7, once_plan());
+    resolve(&mut s, &c, 7, 10, done(None)).expect("completed");
+
+    let order: Vec<_> = s
+        .alarms(&c, 10)
+        .expect("alarms")
+        .upcoming
+        .iter()
+        .map(|item| item.reminder_id)
+        .collect();
+    assert_eq!(order, vec![rid(3), rid(1), rid(2)]);
+
+    assert_eq!(s.alarms(&c, 2).expect("alarms").upcoming.len(), 2);
+}
+
+#[test]
+fn alarms_report_reminders_they_cannot_schedule() {
+    let mut s = service();
+    let c = ctx(NOW);
+    let bad_zone = Reminder {
+        id: rid(1),
+        title: title("Broken"),
+        notes: String::new(),
+        plan: once_due(
+            civil::date(2026, 11, 20).at(9, 0, 0, 0),
+            Zone::Fixed("Not/AZone".to_owned()),
+        ),
+        archived_at: None,
+        meta: Meta {
+            revision: 1,
+            created_at: c.now,
+            updated_at: c.now,
+            deleted_at: None,
+        },
+    };
+    let progress = Progress::initial(rid(1), &bad_zone.plan, c.now)
+        .map(|progress| ProgressWrite::Put(progress, Expect::Absent));
+    s.storage
+        .commit(WriteSet {
+            reminder: Some((bad_zone, Expect::Absent)),
+            progress,
+            resolution: None,
+        })
+        .expect("stored");
+
+    let list = s.alarms(&c, 10).expect("alarms");
+    assert!(list.upcoming.is_empty());
+    assert_eq!(
+        list.unresolved,
+        vec![Unresolved {
+            reminder_id: rid(1),
+            reason: UnresolvedReason::Zone(ZoneError::UnknownZone("Not/AZone".to_owned())),
+        }]
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn alarms_find_the_first_slot_that_fires_after_now(
+        rec in any_recurrence(),
+        offset_seconds in 0..(700 * 86_400i64),
+    ) {
+        let mut s = service();
+        let plan = Plan::Ongoing {
+            cadence: Some(Cadence { recurrence: rec.clone(), alert: alert() }),
+        };
+        // A recurrence that ends before it starts is refused. Nothing to check there.
+        prop_assume!(s.create(&ctx(NOW), rid(1), draft(plan)).is_ok());
+
+        // Floating slots in a UTC device zone fire at their own clock time.
+        let start = TimeZone::UTC
+            .to_timestamp(rec.starts_on.to_datetime(civil::Time::midnight()))
+            .expect("a representable instant");
+        let now = start
+            .checked_add(SignedDuration::from_secs(offset_seconds))
+            .expect("a representable instant");
+        let c = Context { now, device_zone: TimeZone::UTC };
+
+        let last_day = rec.starts_on + 800.days();
+        let expected = oracle(&rec, last_day).into_iter().find(|slot| {
+            TimeZone::UTC.to_timestamp(slot.0).expect("a representable instant") > now
+        });
+        let actual = slots_of(&s.alarms(&c, 1).expect("alarms")).first().copied();
+
+        match expected {
+            Some(_) => prop_assert_eq!(actual, expected),
+            // The enumeration stopped at its horizon, so a slot just past it is fine.
+            None => prop_assert!(actual.is_none_or(|Slot(slot)| slot.date() > last_day)),
+        }
+    }
 }
 
 // --- command sequences ----------------------------------------------------
