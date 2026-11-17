@@ -14,3 +14,6 @@ rusqlite = { version = "0.42.0", features = ["bundled"] }
 uniffi = { workspace = true }
 uuid = "1.29.2"
 
+[dev-dependencies]
+proptest = "1.12.0"
+

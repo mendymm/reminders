@@ -17,6 +17,9 @@
 
 mod values;
 
+#[cfg(test)]
+mod tests;
+
 use std::num::NonZeroU32;
 
 use jiff::{Timestamp, civil};

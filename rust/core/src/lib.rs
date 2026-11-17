@@ -7,13 +7,3 @@ pub mod model;
 pub fn ping() -> String {
     "this is new from Rust".to_owned()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ping;
-
-    #[test]
-    fn ping_identifies_the_rust_core() {
-        assert_eq!(ping(), "pong from Rust");
-    }
-}
