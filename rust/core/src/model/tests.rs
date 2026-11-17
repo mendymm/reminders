@@ -1,9 +1,12 @@
 //! Property tests for the validated value types.
 
-use jiff::{SignedDuration, civil};
+use jiff::{SignedDuration, Timestamp, civil};
 use proptest::prelude::*;
 
-use super::{ClockTimes, DayOfMonth, InvalidValue, PositiveDuration, Weekdays, Window};
+use super::{
+    ClockTimes, DayOfMonth, InvalidValue, PositiveDuration, ReminderId, ResolutionId, Weekdays,
+    Window,
+};
 
 /// Any time of day, to nanosecond precision, so that sub-second differences are
 /// exercised.
@@ -142,4 +145,44 @@ proptest! {
             .expect("every_nanos is positive");
         prop_assert!(Window::new(every, at, at).is_ok());
     }
+}
+
+/// Instants from the epoch to about the year 2096, with nanoseconds.
+fn any_instant() -> impl Strategy<Value = Timestamp> {
+    (0..4_000_000_000i64, 0..1_000_000_000i32)
+        .prop_map(|(seconds, nanos)| Timestamp::new(seconds, nanos).expect("in range"))
+}
+
+proptest! {
+    #[test]
+    fn ids_are_version_7_and_carry_their_instant_to_the_millisecond(now in any_instant()) {
+        for id in [ReminderId::new(now).0, ResolutionId::new(now).0] {
+            prop_assert_eq!(id.get_version_num(), 7);
+            let (seconds, nanos) = id.get_timestamp().expect("a v7 id has a timestamp").to_unix();
+            prop_assert_eq!(seconds, u64::try_from(now.as_second()).expect("after the epoch"));
+            let millisecond_nanos = u32::try_from(now.subsec_nanosecond()).expect("after the epoch") / 1_000_000 * 1_000_000;
+            prop_assert_eq!(nanos, millisecond_nanos);
+        }
+    }
+
+    #[test]
+    fn ids_sort_by_the_instant_they_were_made_at(earlier in any_instant(), later in any_instant()) {
+        prop_assume!(earlier.as_millisecond() < later.as_millisecond());
+        prop_assert!(ReminderId::new(earlier).0 < ReminderId::new(later).0);
+        prop_assert!(ResolutionId::new(earlier).0 < ResolutionId::new(later).0);
+    }
+}
+
+#[test]
+fn ids_made_at_the_same_instant_still_differ() {
+    let now = Timestamp::from_second(1_800_000_000).expect("in range");
+    assert_ne!(ReminderId::new(now), ReminderId::new(now));
+}
+
+#[test]
+fn an_instant_before_the_epoch_is_stamped_as_the_epoch() {
+    let before = Timestamp::from_second(-5).expect("in range");
+    let id = ReminderId::new(before).0;
+    assert_eq!(id.get_version_num(), 7);
+    assert_eq!(id.get_timestamp().expect("a v7 id has a timestamp").to_unix(), (0, 0));
 }
